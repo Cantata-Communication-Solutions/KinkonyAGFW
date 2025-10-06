@@ -16,11 +16,12 @@ The latest stable firmware is available in the [`/bin`](./bin) directory:
 ---
 
 #### 🧰 Requirements
-- **ESP32 board** (Kincony AG Hub or compatible)
-- **USB-to-UART cable**
-- [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/index.html) or [esptool.py](https://github.com/espressif/esptool) installed
+- **Kincony AG Hub** (or any compatible **ESP32**-based IR + RF hub)  
+- **USB-to-Mini-USB cable** (for power and flashing)  
+- [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/index.html) or [esptool.py](https://github.com/espressif/esptool) installed  
 
----
+> 💡 **Note:** No external UART adapter is required — the Kincony AG Hub supports native USB flashing via its mini-USB port.
+
 
 #### ⚙️ Flashing via esptool.py
 
@@ -31,6 +32,19 @@ The latest stable firmware is available in the [`/bin`](./bin) directory:
 ```bash
 esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600   write_flash 0x1000 bin/Haptique_Kincony_AG_Firmware_V1.bin
 ```
+#### 🪟 Alternative Flash Method (Kincony Flash Tool)
+
+If you prefer a graphical flashing tool on Windows, you can use the official **Kincony Flash Tool**:
+
+1. Download the latest version from [Kincony’s official site](https://www.kincony.com/esp-module-flash-download-tools.html)  
+2. Open the tool and select the firmware file: `bin/Haptique_Kincony_AG_Firmware_V1.bin`
+3. Choose your COM port and click **Start** to flash.
+
+> ⚙️ **Note:**  
+> This tool provides a user-friendly interface but is **Windows-only**.  
+> For full cross-platform compatibility and automation, use [esptool.py](https://github.com/espressif/esptool).
+  
+
 
 > 💡 **Tip:**  
 > You can also use `idf.py flash` if you have the ESP-IDF environment configured.
