@@ -1,7 +1,7 @@
 # KinkonyAGFW  
 **IR + RF Hub Firmware for Kincony AG Hub with Haptique RS90**
 
-![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
 ![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey.svg)
 ![Platform](https://img.shields.io/badge/platform-ESP32-orange.svg)
