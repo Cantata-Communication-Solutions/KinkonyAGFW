@@ -152,6 +152,10 @@ python tools/rf_send.py --host http://<device-ip> \
 > These scripts only require `requests` and map 1:1 to the firmware endpoints implemented in the sketch.
 
 ---
+## 🗓️ Changelog
+
+See the full [CHANGELOG.md](./CHANGELOG.md) for release history.
+
 
 ## ✨ Features
 
