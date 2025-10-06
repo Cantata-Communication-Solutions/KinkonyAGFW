@@ -84,7 +84,7 @@ After successful setup:
 
 ## 🧩 Next Steps
 
-- Integrate with **Haptique Dashboard** or **RS90 App**
+- Integrate with **Haptique Configapp** for **RS90**
 - Contribute improvements via GitHub pull requests
 - Share your feedback on new API features
 
