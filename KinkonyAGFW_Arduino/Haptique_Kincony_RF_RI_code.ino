@@ -51,7 +51,7 @@
 #include <Update.h>
 
 // ======= VERSION: bump each release =======
-#define FIRMWARE_VERSION "2.0.1"
+#define FIRMWARE_VERSION "1.0.0"
 #define MANUFACTURE "KINCONY"
 
 // ======= Pins =======
@@ -1420,5 +1420,6 @@ void loop() {
 
   delay(1);
 }
+
 
 
