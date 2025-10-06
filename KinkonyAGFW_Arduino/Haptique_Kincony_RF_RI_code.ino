@@ -1,6 +1,4 @@
-/*  ESP32 IR Gateway (IR only) — A/B capture, CSV echo, WebSocket TX, AP+STA provisioning, IO0 10s factory reset.
-    + OTA via your own server (manifest.json + firmware.bin), optional auth, auto-check/install
-    (C) You, enjoy!  — minimal deps: WiFi.h, WebServer.h, ArduinoJson, HTTPClient, WiFiClientSecure, Update
+
 
     IR:
       TX (LEDC) : GPIO2
@@ -1422,3 +1420,4 @@ void loop() {
 
   delay(1);
 }
+
