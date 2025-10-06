@@ -71,7 +71,7 @@ You can then follow the [Setup Guide](./docs/Device_Setup_Guide.md) to configure
 This repository also includes the **open-source Arduino firmware**.
 
 **Source:** [`/KinkonyAGFW_Arduino`](./KinkonyAGFW_Arduino)  
-**Main file:** [Haptique_Kincony_RF_RI_code.ino](./KinkonyAGFW_Arduino/Haptique_Kincony_RF_RI_code.ino)
+**Main file:** [Haptique_AGFW.ino](./KinkonyAGFW_Arduino/Haptique_AGFW.ino)
 
 ### 🧩 Build Steps
 1. Install [Arduino IDE](https://www.arduino.cc/en/software) or [PlatformIO](https://platformio.org/).  
