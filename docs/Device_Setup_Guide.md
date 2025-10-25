@@ -35,7 +35,7 @@ This guide helps you configure the **Haptique Extender firmware (KinkonyAGFW)** 
 2. Open the tool and select the firmware file:  
    `bin/Haptique_Kincony_AG_Firmware_V1.Main.bin`  -> `0x0`
 3. Choose the correct COM port, BAUD - 115200 and click **Start** to flash.
-<img width="827" height="1341" alt="image" src="https://github.com/user-attachments/assets/a68f977e-d043-4524-9427-8386b8c1823f" />
+<img width="413" height="670" alt="image" src="https://github.com/user-attachments/assets/a68f977e-d043-4524-9427-8386b8c1823f" />
 
 > ⚙️ The Kincony tool provides a simple UI but works on **Windows only**.
 
