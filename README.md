@@ -22,7 +22,10 @@
 
 /
 ├─ bin/
+│  └─ Haptique_Kincony_AG_Firmware_V1.bootloader.bin
+│  └─ Haptique_Kincony_AG_Firmware_V1.partitions.bin
 │  └─ Haptique_Kincony_AG_Firmware_V1.bin
+│  └─ Haptique_Kincony_AG_Firmware_V1.Main.bin
 ├─ KinkonyAGFW_Arduino/
 │  └─ Haptique_AGFW.ino
 ├─ docs/
