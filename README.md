@@ -173,8 +173,8 @@ See the full [CHANGELOG.md](./CHANGELOG.md) for release history.
 
 We’ve moved detailed instructions to `/docs`:
 
-* [Setup Guide](./docs/SetupGuide.md)
-* [API Reference](./docs/API_Reference.md)
+* [Setup Guide](./docs/Device_Setup_Guide.md)
+* [API Overview](./docs/API_Overview.md)
 
 ---
 
