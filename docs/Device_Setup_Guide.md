@@ -33,8 +33,9 @@ This guide helps you configure the **Haptique Extender firmware (KinkonyAGFW)** 
 
 1. Download from [Kincony Flash Tool page](https://www.kincony.com/esp-module-flash-download-tools.html).  
 2. Open the tool and select the firmware file:  
-   `bin/Haptique_Kincony_AG_Firmware_V1.Main.bin`  
-3. Choose the correct COM port and click **Start** to flash.
+   `bin/Haptique_Kincony_AG_Firmware_V1.Main.bin`  -> `0x0`
+3. Choose the correct COM port, BAUD - 115200 and click **Start** to flash.
+<img width="827" height="1341" alt="image" src="https://github.com/user-attachments/assets/a68f977e-d043-4524-9427-8386b8c1823f" />
 
 > ⚙️ The Kincony tool provides a simple UI but works on **Windows only**.
 
