@@ -29,6 +29,7 @@
 │  ├─ SetupGuide.md
 │  └─ API_Reference.md
 ├─ tools/
+│  ├─ flash_firmware.sh    # Flash ESP32 firmware via esptool.py
 │  ├─ wifi_config.py       # POST /api/wifi/save
 │  ├─ status_check.py      # GET  /api/status
 │  ├─ ir_send.py           # POST /api/ir/send
