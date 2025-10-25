@@ -21,7 +21,7 @@ This guide helps you configure the **Haptique Extender firmware (KinkonyAGFW)** 
 2. Connect your Kincony AG Hub via Mini-USB.
 3. Open a terminal and run:
    ```bash
-   esptool.py --chip esp32 write_flash 0x00000 bin/Haptique_Kincony_AG_Firmware_V1.Main.bin
+   python -m esptool --chip esp32 write-flash 0x0 Haptique_Kincony_AG_Firmware_V1.Main.bin
    ```
 4. Wait until flashing completes and the device restarts.
 
