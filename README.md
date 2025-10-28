@@ -66,9 +66,8 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 write_flash 0x1000 bin
 
 > For cross-platform and automation, prefer **esptool.py**.
 
-########################################
-Alternative KC868-AG Flash Solution:
-########################################
+####
+Alternative KC868-AG Flash Solution (Windows User Only):
 
 1. #### Install Arduino IDE
 Download Arduino IDE 2.x: https://www.arduino.cc/en/software
