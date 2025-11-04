@@ -9,7 +9,7 @@
 ---
 
 ## 🔎 Quick Links
-- 📥 **Firmware**: [`bin/Haptique_Kincony_AG_Firmware_V1.bin`](./bin/Haptique_Kincony_AG_Firmware_V1.1.2.Main.bin)  
+- 📥 **Firmware**: [`bin/Haptique_Kincony_AG_Firmware_V1.1.2.bin`](./bin/Haptique_Kincony_AG_Firmware_V1.1.2.Main.bin)  
 - 🧩 **Source (Arduino)**: [`KinkonyAGFW_Arduino/Haptique_AGFW.ino`](./KinkonyAGFW_Arduino/Haptique_AGFW.ino)  
 - 📚 **Docs**: [Setup Guide](./docs/SetupGuide.md) · [API Reference](./docs/API_Reference.md)  
 - 🧪 **Tools**: see [`/tools`](./tools) (Python test scripts)
