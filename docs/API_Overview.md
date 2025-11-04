@@ -30,6 +30,8 @@ Content-Type: application/json
   "pass": "YourPassword"
 }
 ```
+After Wi-Fi setup, the device returns a **token**.  
+Include it in headers for all future requests:
 
 **Behavior**
 - Saves credentials and attempts to connect to the network.
@@ -46,6 +48,12 @@ curl -X POST -H "Content-Type: application/json" -d '{"ssid":"HomeNetwork","pass
 
 ### `GET /api/status`
 
+with 
+**Headers**
+```
+Content-Type: application/json
+Authorization: Bearer{{token}}
+```
 Returns device status and configuration details.
 
 **Response Example**
@@ -72,6 +80,7 @@ Change the device name/hostname.
 **Headers**
 ```
 Content-Type: application/json
+Authorization: Bearer{{token}}
 ```
 
 **Body Example**
@@ -97,6 +106,7 @@ Send a captured IR command.
 **Headers**
 ```
 Content-Type: application/json
+Authorization: Bearer{{token}}
 ```
 
 **Body Example**
@@ -123,18 +133,26 @@ Content-Type: application/json
 Retrieve the most recent captured IR command.
 
 **Example**
-```bash
-curl http://192.168.1.100/api/ir/last
 ```
+Content-Type: application/json
+Authorization: Bearer{{token}}
+````
 
 **Response Example**
 ```json
 {
-  "protocol": "NEC",
-  "address": "0x10",
-  "command": "0xEF",
-  "raw": [9000,4500,560,560,560,1690,...]
-}
+    "type": "ir_rx",
+    "freq_khz": 38,
+    "frames": 2,
+    "gap_ms": 107,
+    "gap_us": 107000,
+    "countA": 68,
+    "a": [
+        4523,4509,560,584,...],
+    "countB": 68, "b": [ 4523,4509,560,584,...],
+    "combined_count": 136,
+    "combined": [ 4523,4509,560,584,...],
+       }
 ```
 
 ---
