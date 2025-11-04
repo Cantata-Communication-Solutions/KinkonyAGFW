@@ -9,7 +9,7 @@
 ---
 
 ## 🔎 Quick Links
-- 📥 **Firmware**: [`bin/Haptique_Kincony_AG_Firmware_V1.bin`](./bin/Haptique_Kincony_AG_Firmware_V1.bin)  
+- 📥 **Firmware**: [`bin/Haptique_Kincony_AG_Firmware_V1.bin`](./bin/Haptique_Kincony_AG_Firmware_V1.1.2.Main.bin)  
 - 🧩 **Source (Arduino)**: [`KinkonyAGFW_Arduino/Haptique_AGFW.ino`](./KinkonyAGFW_Arduino/Haptique_AGFW.ino)  
 - 📚 **Docs**: [Setup Guide](./docs/SetupGuide.md) · [API Reference](./docs/API_Reference.md)  
 - 🧪 **Tools**: see [`/tools`](./tools) (Python test scripts)
@@ -22,10 +22,8 @@
 
 /
 ├─ bin/
-│  └─ Haptique_Kincony_AG_Firmware_V1.bootloader.bin
-│  └─ Haptique_Kincony_AG_Firmware_V1.partitions.bin
-│  └─ Haptique_Kincony_AG_Firmware_V1.bin
 │  └─ Haptique_Kincony_AG_Firmware_V1.Main.bin
+│  └─ Haptique_Kincony_AG_Firmware_V1.1.2.Main.bin
 ├─ KinkonyAGFW_Arduino/
 │  └─ Haptique_AGFW.ino
 ├─ docs/
@@ -44,18 +42,25 @@
 ````
 
 ---
+## 📦 Firmware Installation
 
-## 📦 Firmware Download & Flash
+### ✅ Recommended: Web Browser Flash (No Tools Required)
 
-The latest stable firmware is in [`/bin`](./bin):  
-👉 [`Haptique_Kincony_AG_Firmware_V1.bin`](./bin/Haptique_Kincony_AG_Firmware_V1.bin)
+Flash via Chrome / Edge directly from the web:
 
-### Requirements
-- Kincony AG Hub (ESP32-based)
-- **USB-to-Mini-USB** cable (for power + flashing; no external UART needed)
-- [esptool.py](https://github.com/espressif/esptool) or ESP-IDF installed
+**Start here:**  
+👉 https://support.haptique.io/en/firmware/install
 
-### Flash with esptool.py
+**Steps**
+1. Connect Kincony Hub via **USB-to-Mini-USB**
+2. Open the link above
+3. Select `.bin` firmware file
+4. Click **Flash**
+
+> ⚠️ Some USB cables are **power-only** — use a data-capable cable.
+
+
+### 🛠️ Advanced: Flash via `esptool.py`
 ```bash
 # Replace /dev/ttyUSB0 with your serial port
 # macOS: /dev/cu.usbserial* or /dev/cu.usbmodem*
