@@ -14,8 +14,20 @@ This guide helps you configure the **Haptique Extender firmware (KinkonyAGFW)** 
 ---
 
 ## ⚡ Step 2: Flash the Firmware
+### Option A — Flash via Haptique Online Firmware Tool (Recommended)
 
-### Option A — Using esptool.py (Cross-Platform)
+1. Open the firmware installer page:
+   https://support.haptique.io/en/firmware/install
+2. Connect the Kincony device to your laptop using a USB cable.
+3. Scroll down and click Connect.
+4. Select the Kincony COM port
+   If unsure — unplug and reconnect the device, then select the new COM port.
+5. Follow the on-screen instructions to flash the firmware.
+6. Open Log View, press Reset Device, and wait for the log output.
+7. Copy the token & IP address displayed — you’ll use them for communication later.
+ 💡 This method requires no software installation and works directly from your browser.
+
+### Option B — Using esptool.py (Cross-Platform)
 
 1. Download and install [esptool.py](https://github.com/espressif/esptool).
 2. Connect your Kincony AG Hub via Mini-USB.
@@ -29,7 +41,7 @@ This guide helps you configure the **Haptique Extender firmware (KinkonyAGFW)** 
 
 ---
 
-### Option B — Using Kincony Flash Tool (Windows)
+### Option C — Using Kincony Flash Tool (Windows)
 
 1. Download from [Kincony Flash Tool page](https://www.kincony.com/esp-module-flash-download-tools.html).  
 2. Open the tool and select the firmware file:  
