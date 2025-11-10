@@ -1,0 +1,17 @@
+name: Notify Discord on New Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  discord_notification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Discord Release Notification
+        uses: SethCohen/github-releases-to-discord@v1.19
+        with:
+          webhook_url: ${{ secrets.DISCORD_WEBHOOK }}
+          username: "Mr Release note"
+          color: "00FF00" 
+          footer_title: "Published by CI/CD"
