@@ -39,9 +39,13 @@ Include it in headers for all future requests:
 
 **Example (curl)**
 ```bash
-curl -X POST -H "Content-Type: application/json" -d '{"ssid":"HomeNetwork","pass":"MyWifiPass"}' http://haptique-extender/api/wifi/save
-```
+curl -X POST ^
+  -H "Content-Type: application/json" ^
+  -d "{\"ssid\": \"YourSSID\", \"pass\": \"YourPassword\"}" ^
+  http://haptique-extender.local/api/wifi/save
 
+```
+⚠️ Replace YourSSID and YourPassword with your actual Wi-Fi credentials.
 ---
 
 ## 🔍 Device Information API
@@ -92,9 +96,14 @@ Authorization: Bearer{{token}}
 
 **Example (curl)**
 ```bash
-curl -X POST -H "Content-Type: application/json" -d '{"instance":"LivingRoomExtender"}' http://haptique-extender/api/hostname
-```
+curl -X POST ^
+  -H "Content-Type: application/json" ^
+  -H "Authorization: Bearer YOUR_TOKEN_HERE" ^
+  -d "{\"hostname\": \"haptique-extender\", \"instance\": \"Haptique Extender\"}" ^
+  http://haptique-extender.local/api/hostname
 
+```
+instance: Friendly name shown in UI/Bonjour
 ---
 
 ## 📤 IR Send API
