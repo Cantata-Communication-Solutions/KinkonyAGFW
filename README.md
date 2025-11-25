@@ -24,6 +24,7 @@
 ├─ bin/
 │  └─ Haptique_Kincony_AG_Firmware_V1.Main.bin
 │  └─ Haptique_Kincony_AG_Firmware_V1.1.2.Main.bin
+│  └─ Haptique_Kincony_AG_Firmware_V1.2.1.Main.bin 
 ├─ KinkonyAGFW_Arduino/
 │  └─ Haptique_AGFW.ino
 ├─ docs/
