@@ -76,6 +76,55 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 write_flash 0x1000 bin
 
 > For cross-platform and automation, prefer **esptool.py**.
 
+####
+Alternative KC868-AG Flash Solution (Windows User Only):
+
+1. #### Install Arduino IDE
+Download Arduino IDE 2.x: https://www.arduino.cc/en/software
+Install it
+
+2. #### Configure Arduino IDE
+Open Arduino IDE, then:
+Add ESP32 support:
+Go to File → Preferences
+In "Add-on Board Manager URLs", add:
+https://espressif.github.io/arduino-esp32/package_esp32_index.json
+- Click OK
+- Go to Tools → Board Type → Board Manager
+- Search for "esp32" and install "esp32 by Espressif Systems"
+
+3. #### Install the necessary libraries
+Go to Tools → Manage Libraries, search for and install:
+	1. *ArduinoJson* (by Benoit Blanchon) - version 6.x
+	2. *WebSockets* (by Markus Sattler / links2004)
+	3. *rc-switch* (by sui77)
+	4. *ESPAsyncWebServer* (search for "ESP Async WebServer")
+	5. *AsyncTCP* (for ESP32)
+
+4. #### Prepare the project
+	1. Create a folder named *exactly* Haptique_AGFW
+	2. Place your Haptique_AGFW.ino file there
+	3. Open the .ino file in Arduino IDE (double-click on it)
+
+5. #### Board configuration
+In Arduino IDE, configure:
+- *Board*: ESP32 Dev Module
+- *Upload Speed*: 115200 (or 921600 if it (working)
+- *CPU Frequency*: 240MHz
+- *Flash Frequency*: 80MHz
+- *Flash Mode*: DIO
+- *Flash Size*: 4MB (32MB)
+- *Partition Scheme*: Default 4MB with spiffs
+- *Port*: COMxx (COM Port where your KC868-AG is connected to)
+
+6. #### Upload
+	1. Connect the KC868-AG to the COMxx port.
+	2. Click the Upload button (arrow →).
+
+Then, you should be able to see WiFi access point: HAP_IRHUB / password: 12345678
+Connect to this network with your phone/PC
+Access the interface: http://192.168.4.1
+
 ---
 
 ## 🔄 First Boot / Provisioning
