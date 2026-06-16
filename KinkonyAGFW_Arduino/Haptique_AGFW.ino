@@ -1,5 +1,5 @@
 /*
-    ESP32 IR/RF GATEWAY + COMMAND STORAGE v1.2.1
+    ESP32 IR/RF GATEWAY + COMMAND STORAGE v1.2.2
     ============================================
     NEW FEATURES:
     - WebSocket support (no authentication)
@@ -52,7 +52,7 @@
 #include "mbedtls/sha256.h"
 
 // ======= VERSION =======
-#define FIRMWARE_VERSION "1.2.1"
+#define FIRMWARE_VERSION "1.2.2"
 #define MANUFACTURE "KINCONY"
 #define MODEL "KC868-AG"
 
@@ -3527,7 +3527,7 @@ void setup() {
   esp_log_level_set("*", ESP_LOG_WARN);
 
   Serial.println("\n╔════════════════════════════════════════════════════════╗");
-  Serial.println("║       ESP32 IR/RF GATEWAY + WEBSOCKET v1.2.1          ║");
+  Serial.println("║       ESP32 IR/RF GATEWAY + WEBSOCKET v1.2.2          ║");
   Serial.println("╚════════════════════════════════════════════════════════╝");
 
   checkPowerCycleReset();
