@@ -41,9 +41,22 @@ jobs:
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build Haptique_AGFW/Haptique_AGFW.ino
 
+      - name: Install esptool
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install esptool
+
+      - name: Merge Binaries
+        run: |
+          esptool.py --chip esp32 merge_bin -o build/Haptique_AGFW_Merged.bin \
+            --flash_mode dio --flash_freq 40m --flash_size 4MB \
+            0x1000 build/Haptique_AGFW.ino.bootloader.bin \
+            0x8000 build/Haptique_AGFW.ino.partitions.bin \
+            0x10000 build/Haptique_AGFW.ino.bin
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: compiled-firmware
-          path: build/Haptique_AGFW.ino.bin
+          path: build/Haptique_AGFW_Merged.bin
           if-no-files-found: ignore
