@@ -1,6 +1,17 @@
 /*
-    ESP32 IR/RF GATEWAY + COMMAND STORAGE v1.1.2
+    ESP32 IR/RF GATEWAY + COMMAND STORAGE v1.2.2
     ============================================
+    NEW FEATURES:
+    - WebSocket support (no authentication)
+    - Static/DHCP IP configuration for STA mode
+    
+    WebSocket:
+      WS  /ws                    WebSocket connection (broadcasts IR/RF events)
+      
+    Network Configuration:
+      GET  /api/network/config   Get current network configuration
+      POST /api/network/config   Set static IP or DHCP
+      
     RF Command Storage:
       POST /api/rf/save          Save last received RF with name
       GET  /api/rf/saved         List all saved RF commands
@@ -13,50 +24,10 @@
       POST /api/ir/send/name     Send saved IR by name
       DELETE /api/ir/delete      Delete saved IR command
 */
-/*
-    IR:
-      TX (LEDC) : GPIO2
-      RX (RMT0) : GPIO23  (TSOP active-low)
-    
-    RF 433MHz:
-      RX : GPIO13
-      TX : GPIO22
-
-    Web API:
-      GET  /                      -> "OK"
-      GET  /api/status
-      GET  /api/hostname
-      POST /api/hostname          {"hostname":"haptique-extender","instance":"Haptique Extender"}
-      GET  /api/wifi/status
-      POST /api/wifi/save         {"ssid":"...","pass":"..."}
-      POST /api/wifi/forget
-      GET  /api/wifi/scan 
-      GET  /api/ir/test           ?ms=800
-      POST /api/ir/send           {"freq_khz":38,"duty":33,"repeat":1,"raw":[...]}
-      GET  /api/ir/last
-      
-      GET  /api/rf/last           -> Get last RF received
-      POST /api/rf/send           {"code":12345,"bits":24,"protocol":1,"repeat":10}
-      GET  /api/rf/status         -> RF module status
-
-    OTA:
-      GET  /api/ota/status
-      GET  /api/ota/config
-      POST /api/ota/config
-      GET  /api/ota/manifest
-      POST /api/ota/check
-      POST /api/ota/url
-
-    Challenge-Response Auth:
-      POST /api/auth/challenge/setup   -> Setup PIN
-      GET  /api/auth/challenge/get     -> Get challenge + MAC
-      POST /api/auth/challenge/verify  -> Verify response & get token
-      POST /api/auth/challenge/reset   -> Reset PIN
-      GET  /api/auth/challenge/status  -> Get auth status
-*/
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WebSocketsServer.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
@@ -67,7 +38,10 @@
 #include <RCSwitch.h>
 #include "esp_log.h"
 #include "esp_wifi_types.h"
-
+// ======= Power Cycle Reset =======
+#define POWER_CYCLE_RESET_COUNT 7
+#define POWER_CYCLE_WINDOW_MS   10000  // 10 seconds window
+#define STABLE_RUN_TIME_MS      30000  // 30 seconds of stable operation clears counter
 // OTA
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -78,7 +52,7 @@
 #include "mbedtls/sha256.h"
 
 // ======= VERSION =======
-#define FIRMWARE_VERSION "1.1.2"
+#define FIRMWARE_VERSION "1.2.2"
 #define MANUFACTURE "KINCONY"
 #define MODEL "KC868-AG"
 
@@ -97,13 +71,18 @@
 #define FACTORY_HOLD_MS      10000
 
 #define OTA_API_URL "https://app.cantatacs.com/remote/ir-extender/software/update/get"
+const char* DEFAULT_MANIFEST_URL = "https://app.cantatacs.com/remote/ir-extender/software/update/get";
+
+// Power Cycle Reset
+static uint32_t g_stableRunStartMs = 0;
+static bool g_powerCycleResetChecked = false;
 
 // ======= Storage Limits =======
 #define MAX_RF_COMMANDS  100
 #define MAX_IR_COMMANDS  50
 #define MAX_NAME_LENGTH  32
-#define MAX_IR_RAW_STORE 512  // Limit stored IR raw data
-#define MAX_INDEX_SIZE   2048 // Max size for name index string
+#define MAX_IR_RAW_STORE 512
+#define MAX_INDEX_SIZE   2048
 
 struct Manifest;
 struct OtaInfo {
@@ -115,6 +94,18 @@ struct OtaInfo {
   String notes;
 };
 
+// ======= Network Configuration Structure =======
+struct NetworkConfig {
+  bool useStaticIP;
+  IPAddress staticIP;
+  IPAddress gateway;
+  IPAddress subnet;
+  IPAddress dns1;
+  IPAddress dns2;
+};
+
+NetworkConfig netConfig;
+
 // ======= Stored Command Structures =======
 struct RfCommand {
   char name[MAX_NAME_LENGTH];
@@ -124,31 +115,13 @@ struct RfCommand {
   uint16_t pulseLen;
 };
 
-/*
- * The IR command structure persists captured IR timings to flash via the
- * Preferences (NVS) API.  Previous versions of this sketch stored the
- * pulse durations as an array of 32‑bit values.  Unfortunately NVS has
- * a practical limit on the size of a single value (roughly <2 kB).  A
- * struct holding 512 × 32‑bit values (~2088 bytes) would exceed that limit
- * when combined with the other fields, causing `prefs.putBytes()` to
- * silently fail.  To avoid this problem while still supporting long
- * sequences, the durations are now stored in compressed form.  Each
- * microsecond value is divided by IR_STORE_DIV (currently 10) and the
- * result rounded to the nearest integer.  The result fits into a 16‑bit
- * integer, reducing the overall size of the struct to ~1064 bytes and
- * keeping it well within the NVS per‑value limit.  When reading the
- * command back the values are multiplied by the same divisor to restore
- * the original timing in microseconds.  This introduces a maximum
- * rounding error of ±(IR_STORE_DIV/2) microseconds, which is well within
- * the tolerances of typical IR receivers.
- */
 #define IR_STORE_DIV 10
 struct IrCommand {
-  char name[MAX_NAME_LENGTH];     // sanitized command name
-  uint32_t freqHz;                // carrier frequency (Hz)
-  uint8_t duty;                   // duty cycle percent
-  uint16_t count;                 // number of timing values
-  uint16_t raw[MAX_IR_RAW_STORE]; // compressed durations (µs / IR_STORE_DIV)
+  char name[MAX_NAME_LENGTH];
+  uint32_t freqHz;
+  uint8_t duty;
+  uint16_t count;
+  uint16_t raw[MAX_IR_RAW_STORE];
 };
 
 // ======= AP =======
@@ -178,6 +151,14 @@ static const char* DEFAULT_INSTANCE = "Haptique Extender";
 #define DEFAULT_AB_GAP_US   30000
 #define IR_RAW_MAX          2048
 
+// Wi-Fi reconnection management
+#define WIFI_RECONNECT_INTERVAL 5000      // Try every 5 seconds
+#define WIFI_RECONNECT_MAX_INTERVAL 30000 // Max 30 seconds between attempts
+volatile uint32_t wifiReconnectAtMs = 0;
+volatile uint32_t wifiReconnectInterval = WIFI_RECONNECT_INTERVAL;
+volatile uint8_t wifiReconnectAttempts = 0;
+#define MAX_RECONNECT_ATTEMPTS 255        // Unlimited attempts
+
 // AP auto-recover
 static bool     apEnabled = false;
 static uint32_t apReenableAtMs = 0;
@@ -186,6 +167,7 @@ static const uint32_t AP_REENABLE_DELAY_MS = 20000;
 // Globals
 Preferences prefs;
 WebServer   server(80);
+WebSocketsServer webSocket = WebSocketsServer(81);
 
 String gHostname = DEFAULT_HOSTNAME;
 String gInstance = DEFAULT_INSTANCE;
@@ -195,9 +177,8 @@ String staSsid, staPass;
 bool   staHaveCreds = false;
 volatile bool staConnected = false;
 volatile bool staConnecting = false;
-volatile uint32_t irFreqHz = 38000;  // update at capture
-volatile uint8_t  irDuty   = 33;     // update at capture
-
+volatile uint32_t irFreqHz = 38000;
+volatile uint8_t  irDuty   = 33;
 
 // ================== AUTH: globals ==================
 String gAuthToken = "";
@@ -237,27 +218,22 @@ size_t irAc = 0, irBc = 0, irCc = 0;
 bool haveIrA = false, haveIrB = false;
 uint32_t tIrA = 0, tIrB = 0, irWin = 0, irLast = 0;
 
-// ✅ PERSISTENT IR STORAGE (for saving commands)
-// ✅ PERSISTENT IR STORAGE (for saving commands)
+// PERSISTENT IR STORAGE
 uint32_t lastIrFreqHz = 38000;
 uint8_t lastIrDuty = 33;
 
-// Frame A storage
 uint16_t lastIrCountA = 0;
 uint32_t lastIrDataA[MAX_IR_RAW_STORE];
 bool hasLastIrDataA = false;
 
-// Frame B storage
 uint16_t lastIrCountB = 0;
 uint32_t lastIrDataB[MAX_IR_RAW_STORE];
 bool hasLastIrDataB = false;
 
-// Combined frame storage
 uint16_t lastIrCountC = 0;
 uint32_t lastIrDataC[MAX_IR_RAW_STORE];
 bool hasLastIrDataC = false;
 
-// Legacy support (points to combined by default)
 uint16_t lastIrCount = 0;
 uint32_t lastIrData[MAX_IR_RAW_STORE];
 bool hasLastIrData = false;
@@ -306,6 +282,168 @@ static String lastManifestVersion = "";
 // Forward declarations
 static void addCORS();
 
+void checkPowerCycleReset() {
+  if (g_powerCycleResetChecked) return;
+  g_powerCycleResetChecked = true;
+
+  prefs.begin("boot", false);
+  
+  // NOTE:
+  // Using millis() across reboots cannot form a real "10s window".
+  // The previous implementation could accumulate unrelated resets and eventually
+  // trigger a factory reset days later. Instead we detect a *boot loop*:
+  // - On boot we mark "stable" = false.
+  // - After STABLE_RUN_TIME_MS we mark "stable" = true and clear the counter.
+  // - If we reboot again before reaching stable, we increment the counter.
+  bool prevStable = prefs.getBool("stable", true);
+  uint32_t bootCount = prefs.getUInt("count", 0);
+
+  if (prevStable) {
+    bootCount = 1;
+    Serial.println("[BOOT] Stable boot -> new boot-loop window started");
+  } else {
+    bootCount++;
+    Serial.printf("[BOOT] Unstable reboot count: %u/%u\n", bootCount, POWER_CYCLE_RESET_COUNT);
+  }
+
+  // Mark this boot as not-yet-stable (will be flipped by clearPowerCycleCounter()).
+  prefs.putBool("stable", false);
+  prefs.putUInt("count", bootCount);
+  prefs.end();
+  
+  g_stableRunStartMs = millis();
+  
+  if (bootCount >= POWER_CYCLE_RESET_COUNT) {
+    Serial.println("\n╔════════════════════════════════════════════════════════╗");
+    Serial.println("║     BOOT LOOP FACTORY RESET TRIGGERED!                ║");
+    Serial.println("║     Too many unstable reboots detected                ║");
+    Serial.println("╚════════════════════════════════════════════════════════╝\n");
+    delay(500);
+    factoryResetNow("Boot_Loop_Reset");
+    return;
+  }
+
+  Serial.printf("[BOOT] Boot loop count: %u (Clears after %ds stable run)\n",
+                bootCount, STABLE_RUN_TIME_MS / 1000);
+}
+
+void clearPowerCycleCounter() {
+  if (g_stableRunStartMs && (millis() - g_stableRunStartMs > STABLE_RUN_TIME_MS)) {
+    prefs.begin("boot", false);
+    uint32_t count = prefs.getUInt("count", 0);
+    if (count > 0) {
+      prefs.putUInt("count", 0);
+      prefs.putBool("stable", true);
+      Serial.println("[BOOT] ✓ Stable operation - power cycle counter cleared");
+    }
+    prefs.end();
+    g_stableRunStartMs = 0; // Only clear once
+  }
+}
+
+// ========== WEBSOCKET FUNCTIONS ==========
+
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[WS] Client #%u disconnected\n", num);
+      break;
+      
+    case WStype_CONNECTED: {
+      IPAddress ip = webSocket.remoteIP(num);
+      Serial.printf("[WS] Client #%u connected from %s\n", num, ip.toString().c_str());
+      
+      // Send welcome message
+      String welcome = "{\"type\":\"connected\",\"message\":\"WebSocket connected\",\"version\":\"" + String(FIRMWARE_VERSION) + "\"}";
+      webSocket.sendTXT(num, welcome);
+      break;
+    }
+    
+    case WStype_TEXT:
+      Serial.printf("[WS] Client #%u sent: %s\n", num, payload);
+      // Echo back for testing
+      webSocket.sendTXT(num, payload, length);
+      break;
+      
+    default:
+      break;
+  }
+}
+
+void broadcastWebSocket(String message) {
+  webSocket.broadcastTXT(message);
+  Serial.printf("[WS] Broadcast: %s\n", message.c_str());
+}
+
+// ========== NETWORK CONFIGURATION FUNCTIONS ==========
+
+void loadNetworkConfig() {
+  prefs.begin("network", true);
+  
+  netConfig.useStaticIP = prefs.getBool("static", false);
+  
+  // Load static IP configuration
+  uint32_t ip = prefs.getUInt("ip", 0);
+  uint32_t gw = prefs.getUInt("gateway", 0);
+  uint32_t sn = prefs.getUInt("subnet", 0);
+  uint32_t d1 = prefs.getUInt("dns1", 0);
+  uint32_t d2 = prefs.getUInt("dns2", 0);
+  
+  prefs.end();
+  
+  if (ip != 0) {
+    netConfig.staticIP = IPAddress(ip);
+    netConfig.gateway = IPAddress(gw);
+    netConfig.subnet = IPAddress(sn);
+    netConfig.dns1 = IPAddress(d1);
+    netConfig.dns2 = IPAddress(d2);
+    
+    Serial.println("[NET] Loaded static IP configuration:");
+    Serial.printf("  IP: %s\n", netConfig.staticIP.toString().c_str());
+    Serial.printf("  Gateway: %s\n", netConfig.gateway.toString().c_str());
+    Serial.printf("  Subnet: %s\n", netConfig.subnet.toString().c_str());
+  } else {
+    Serial.println("[NET] Using DHCP (no static IP configured)");
+  }
+}
+
+void saveNetworkConfig() {
+  prefs.begin("network", false);
+  
+  prefs.putBool("static", netConfig.useStaticIP);
+  
+  if (netConfig.useStaticIP) {
+    prefs.putUInt("ip", (uint32_t)netConfig.staticIP);
+    prefs.putUInt("gateway", (uint32_t)netConfig.gateway);
+    prefs.putUInt("subnet", (uint32_t)netConfig.subnet);
+    prefs.putUInt("dns1", (uint32_t)netConfig.dns1);
+    prefs.putUInt("dns2", (uint32_t)netConfig.dns2);
+    
+    Serial.println("[NET] Saved static IP configuration");
+  } else {
+    Serial.println("[NET] Saved DHCP configuration");
+  }
+  
+  prefs.end();
+}
+
+void applyNetworkConfig() {
+  if (netConfig.useStaticIP && netConfig.staticIP != IPAddress(0, 0, 0, 0)) {
+    Serial.println("[NET] Configuring static IP...");
+    
+    if (!WiFi.config(netConfig.staticIP, netConfig.gateway, netConfig.subnet, 
+                     netConfig.dns1, netConfig.dns2)) {
+      Serial.println("[NET] ERROR: Failed to configure static IP");
+    } else {
+      Serial.printf("[NET] Static IP configured: %s\n", netConfig.staticIP.toString().c_str());
+    }
+  } else {
+    Serial.println("[NET] Using DHCP");
+    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
+  }
+}
+
 // ========== STORAGE HELPER FUNCTIONS ==========
 
 String sanitizeName(const String& input) {
@@ -313,10 +451,8 @@ String sanitizeName(const String& input) {
   name.trim();
   name.toLowerCase();
   
-  // Replace spaces with underscores
   name.replace(" ", "_");
   
-  // Remove invalid characters
   String clean = "";
   for (size_t i = 0; i < name.length() && clean.length() < MAX_NAME_LENGTH - 1; i++) {
     char c = name[i];
@@ -334,19 +470,16 @@ void addRfNameToIndex(const String& name) {
   prefs.begin("rf_cmd", false);
   String index = prefs.getString("index", "");
   
-  // Check if name already exists
   if (index.indexOf(name + ",") >= 0 || index.indexOf("," + name) >= 0 || index == name) {
     prefs.end();
     return;
   }
   
-  // Add name to index
   if (index.length() > 0) {
     index += ",";
   }
   index += name;
   
-  // Truncate if too long
   if (index.length() > MAX_INDEX_SIZE) {
     Serial.println("[RF] Warning: Index truncated");
     index = index.substring(0, MAX_INDEX_SIZE);
@@ -360,7 +493,6 @@ void removeRfNameFromIndex(const String& name) {
   prefs.begin("rf_cmd", false);
   String index = prefs.getString("index", "");
   
-  // Remove name from index
   index.replace(name + ",", "");
   index.replace("," + name, "");
   if (index == name) index = "";
@@ -382,19 +514,16 @@ void addIrNameToIndex(const String& name) {
   prefs.begin("ir_cmd", false);
   String index = prefs.getString("index", "");
   
-  // Check if name already exists
   if (index.indexOf(name + ",") >= 0 || index.indexOf("," + name) >= 0 || index == name) {
     prefs.end();
     return;
   }
   
-  // Add name to index
   if (index.length() > 0) {
     index += ",";
   }
   index += name;
   
-  // Truncate if too long
   if (index.length() > MAX_INDEX_SIZE) {
     Serial.println("[IR] Warning: Index truncated");
     index = index.substring(0, MAX_INDEX_SIZE);
@@ -408,7 +537,6 @@ void removeIrNameFromIndex(const String& name) {
   prefs.begin("ir_cmd", false);
   String index = prefs.getString("index", "");
   
-  // Remove name from index
   index.replace(name + ",", "");
   index.replace("," + name, "");
   if (index == name) index = "";
@@ -425,12 +553,12 @@ String getIrNameIndex() {
 }
 
 // ========== RF COMMAND STORAGE ==========
+
 bool saveRfCommand(const String& name, uint32_t code, uint8_t bits, uint8_t protocol, uint16_t pulseLen) {
   String cleanName = sanitizeName(name);
   
   prefs.begin("rf_cmd", false);
   
-  // Check if we've reached max commands
   int count = prefs.getInt("count", 0);
   bool isUpdate = prefs.isKey(cleanName.c_str());
   
@@ -440,7 +568,6 @@ bool saveRfCommand(const String& name, uint32_t code, uint8_t bits, uint8_t prot
     return false;
   }
   
-  // Save command data
   RfCommand cmd;
   strncpy(cmd.name, cleanName.c_str(), MAX_NAME_LENGTH - 1);
   cmd.name[MAX_NAME_LENGTH - 1] = '\0';
@@ -454,13 +581,17 @@ bool saveRfCommand(const String& name, uint32_t code, uint8_t bits, uint8_t prot
   if (written > 0 && !isUpdate) {
     prefs.putInt("count", count + 1);
     
-    // Store name in numbered key for listing
+
     String keyName = "n" + String(count);
     prefs.putString(keyName.c_str(), cleanName);
   }
   
-  prefs.end();
-  
+  prefs.end();                                    
+
+  if (written > 0 && !isUpdate) {
+  addRfNameToIndex(cleanName);
+  }
+
   Serial.printf("[RF] Saved '%s': code=%u bits=%u proto=%u\n", 
                 cleanName.c_str(), code, bits, protocol);
   return written > 0;
@@ -499,7 +630,6 @@ bool deleteRfCommand(const String& name) {
   
   prefs.end();
   
-  // Remove from name index
   if (existed) {
     removeRfNameFromIndex(cleanName);
   }
@@ -509,60 +639,49 @@ bool deleteRfCommand(const String& name) {
 }
 
 String listRfCommands() {
-  String index = getRfNameIndex();
-  
   DynamicJsonDocument doc(4096);
   JsonArray arr = doc.createNestedArray("commands");
   
   prefs.begin("rf_cmd", true);
   int count = prefs.getInt("count", 0);
-  prefs.end();
   
-  doc["count"] = count;
+  Serial.printf("[RF] Reading %d saved commands using numbered keys...\n", count);
   
-  // Parse comma-separated index
-  if (index.length() > 0) {
-    int startIdx = 0;
-    int commaIdx = 0;
+  // Read from numbered keys (n0, n1, n2, etc.) - same as IR
+  for (int i = 0; i < count; i++) {
+    String keyName = "n" + String(i);
+    String cmdName = prefs.getString(keyName.c_str(), "");
     
-    while ((commaIdx = index.indexOf(',', startIdx)) >= 0) {
-      String cmdName = index.substring(startIdx, commaIdx);
-      cmdName.trim();
-      
-      if (cmdName.length() > 0) {
-        RfCommand cmd;
-        if (loadRfCommand(cmdName, cmd)) {
-          JsonObject obj = arr.createNestedObject();
-          obj["name"] = String(cmd.name);
-          obj["code"] = cmd.code;
-          obj["bits"] = cmd.bits;
-          obj["protocol"] = cmd.protocol;
-          obj["pulseLen"] = cmd.pulseLen;
-        }
-      }
-      
-      startIdx = commaIdx + 1;
-    }
-    
-    // Handle last name (or only name if no commas)
-    String cmdName = index.substring(startIdx);
-    cmdName.trim();
+    Serial.printf("[RF] Key n%d = '%s'\n", i, cmdName.c_str());
     
     if (cmdName.length() > 0) {
-      RfCommand cmd;
-      if (loadRfCommand(cmdName, cmd)) {
+      size_t len = prefs.getBytesLength(cmdName.c_str());
+      
+      if (len == sizeof(RfCommand)) {
+        RfCommand cmd;
+        prefs.getBytes(cmdName.c_str(), &cmd, sizeof(RfCommand));
+        
         JsonObject obj = arr.createNestedObject();
         obj["name"] = String(cmd.name);
         obj["code"] = cmd.code;
         obj["bits"] = cmd.bits;
         obj["protocol"] = cmd.protocol;
         obj["pulseLen"] = cmd.pulseLen;
+        
+        Serial.printf("[RF] ✓ Loaded: %s (code=%u)\n", cmd.name, cmd.code);
       }
     }
   }
   
+  prefs.end();
+  
+  doc["count"] = count;
+  
   String output;
   serializeJson(doc, output);
+  
+  Serial.printf("[RF] List response: %s\n", output.c_str());
+  
   return output;
 }
 
@@ -578,7 +697,6 @@ bool saveIrCommand(const String& name, uint32_t freqHz, uint8_t duty, const uint
   
   prefs.begin("ir_cmd", false);
   
-  // Check if we've reached max commands
   int cmdCount = prefs.getInt("count", 0);
   bool isUpdate = prefs.isKey(cleanName.c_str());
   
@@ -589,41 +707,22 @@ bool saveIrCommand(const String& name, uint32_t freqHz, uint8_t duty, const uint
   }
   
   IrCommand cmd;
-  // Copy and sanitize the name
   strncpy(cmd.name, cleanName.c_str(), MAX_NAME_LENGTH - 1);
   cmd.name[MAX_NAME_LENGTH - 1] = '\0';
-  // Store carrier and duty directly
   cmd.freqHz = freqHz;
   cmd.duty = duty;
-  // Truncate count if necessary
   uint16_t safeCount = count;
   if (safeCount > MAX_IR_RAW_STORE) safeCount = MAX_IR_RAW_STORE;
   cmd.count = safeCount;
-  // Compress the raw pulse durations into 16‑bit values.  Each duration
-  // measured in microseconds is divided by IR_STORE_DIV and rounded.  Large
-  // values are saturated at 0xFFFF.  See IR_STORE_DIV definition for
-  // details.
+  
   for (uint16_t i = 0; i < safeCount; i++) {
     uint32_t v = raw[i];
-    // Perform rounding to minimise error; add half of divisor before
-    // integer division.  Example: (589 + 5) / 10 = 59 → 590 µs after
-    // decompression.
     uint32_t scaled = (v + (IR_STORE_DIV / 2)) / IR_STORE_DIV;
     if (scaled > 0xFFFF) scaled = 0xFFFF;
     cmd.raw[i] = (uint16_t)scaled;
   }
-  // Zero any unused entries to avoid reading garbage when iterating
   for (uint16_t i = safeCount; i < MAX_IR_RAW_STORE; i++) cmd.raw[i] = 0;
 
-  // Persist only the used portion of the struct to NVS.  The
-  // Preferences/NVS library stores values as variable‑length blobs and
-  // space is scarce.  Storing the entire raw buffer (all
-  // MAX_IR_RAW_STORE entries) would waste space when the captured
-  // sequence is shorter.  Compute the size of the struct header (all
-  // fields before the raw array) then add only `safeCount` entries of
-  // the 16‑bit raw array.  This dramatically reduces the size of
-  // each stored command and avoids NVS write failures due to large
-  // values.
   const size_t headerSize = sizeof(IrCommand) - (MAX_IR_RAW_STORE * sizeof(uint16_t));
   size_t dataSize = headerSize + (size_t)safeCount * sizeof(uint16_t);
   size_t written = prefs.putBytes(cleanName.c_str(), &cmd, dataSize);
@@ -631,7 +730,6 @@ bool saveIrCommand(const String& name, uint32_t freqHz, uint8_t duty, const uint
   if (written > 0 && !isUpdate) {
     prefs.putInt("count", cmdCount + 1);
     
-    // Store name in numbered key for listing
     String keyName = "n" + String(cmdCount);
     prefs.putString(keyName.c_str(), cleanName);
   }
@@ -649,18 +747,13 @@ bool loadIrCommand(const String& name, IrCommand& cmd) {
   prefs.begin("ir_cmd", true);
   size_t len = prefs.getBytesLength(cleanName.c_str());
   
-  // The stored data length must at least cover the struct header.
   const size_t headerSize = sizeof(IrCommand) - (MAX_IR_RAW_STORE * sizeof(uint16_t));
   if (len < headerSize) {
     prefs.end();
     return false;
   }
 
-  // Initialise the structure so that any unused raw entries are zeroed.
   memset(&cmd, 0, sizeof(IrCommand));
-  // Read only the stored number of bytes.  Extra bytes in the struct
-  // remain zeroed, which is safe because cmd.count indicates how
-  // many raw entries are valid.
   prefs.getBytes(cleanName.c_str(), &cmd, len);
   prefs.end();
   
@@ -680,7 +773,6 @@ bool deleteIrCommand(const String& name) {
       prefs.putInt("count", count - 1);
     }
     
-    // Remove from numbered keys (rebuild list)
     int newIdx = 0;
     for (int i = 0; i < count; i++) {
       String keyName = "n" + String(i);
@@ -695,7 +787,6 @@ bool deleteIrCommand(const String& name) {
       }
     }
     
-    // Clear any leftover keys
     for (int i = newIdx; i < count; i++) {
       String keyName = "n" + String(i);
       prefs.remove(keyName.c_str());
@@ -719,7 +810,6 @@ String listIrCommands() {
   doc["max"] = MAX_IR_COMMANDS;
   doc["available"] = MAX_IR_COMMANDS - count;
   
-  // Iterate through numbered keys
   for (int i = 0; i < count; i++) {
     String keyName = "n" + String(i);
     String cmdName = prefs.getString(keyName.c_str(), "");
@@ -728,11 +818,6 @@ String listIrCommands() {
       IrCommand cmd;
       size_t len = prefs.getBytesLength(cmdName.c_str());
       
-      // Load the stored command if it is at least large enough to
-      // contain the header.  The size of the header is the total
-      // struct size minus the maximum raw array length.  Commands are
-      // stored as variable‑length blobs, so len may be less than
-      // sizeof(IrCommand) if only part of the raw array was saved.
       const size_t headerSize = sizeof(IrCommand) - (MAX_IR_RAW_STORE * sizeof(uint16_t));
       if (len >= headerSize) {
         memset(&cmd, 0, sizeof(IrCommand));
@@ -745,9 +830,6 @@ String listIrCommands() {
         obj["duty"] = cmd.duty;
         obj["count"] = cmd.count;
 
-        // Add preview of first 10 timings.  Stored values are
-        // compressed (divided by IR_STORE_DIV), so multiply back to
-        // approximate the original microsecond durations.
         JsonArray preview = obj.createNestedArray("preview");
         for (size_t j = 0; j < min(cmd.count, (uint16_t)10); j++) {
           uint32_t us = (uint32_t)cmd.raw[j] * IR_STORE_DIV;
@@ -926,7 +1008,7 @@ static inline bool isAPOn() { return apEnabled; }
 static bool requireAuth() {
   if (!gAuthTokenSet) {
     addCORS();
-    server.send(503, "application/json", "{\"error\":\"token_unavailable\"}");
+    server.send(200, "application/json", "{\"error\":\"token_unavailable\"}");
     return false;
   }
   String tok = readTokenFromRequest();
@@ -1088,6 +1170,11 @@ void onWiFiEvent(WiFiEvent_t e, WiFiEventInfo_t info) {
       staConnected = true;
       staConnecting = false;
       lastStaReason = 0;
+  
+      wifiReconnectAtMs = 0;
+      wifiReconnectInterval = WIFI_RECONNECT_INTERVAL;
+      wifiReconnectAttempts = 0;
+  
       apReenableAtMs = 0;
       stopAPIfRunning("STA connected");
       startMDNSOnce();
@@ -1098,7 +1185,17 @@ void onWiFiEvent(WiFiEvent_t e, WiFiEventInfo_t info) {
       uint8_t reason = info.wifi_sta_disconnected.reason;
       lastStaReason = reason;
       Serial.printf("[WiFi] Disconnected (reason=%u %s)\n", reason, wifiReasonToString(reason));
-      apReenableAtMs = millis() + AP_REENABLE_DELAY_MS;
+              
+      wifiReconnectAtMs = millis() + wifiReconnectInterval;
+      wifiReconnectAttempts++;
+         
+      wifiReconnectInterval = min(wifiReconnectInterval * 2, (uint32_t)WIFI_RECONNECT_MAX_INTERVAL);
+      Serial.printf("[WiFi] Will retry in %u ms (attempt #%u)\n", 
+                    wifiReconnectInterval, wifiReconnectAttempts);
+          
+      if (!apEnabled && wifiReconnectAttempts > 6) {
+        apReenableAtMs = millis() + AP_REENABLE_DELAY_MS;
+      }  
       break;
     }
     case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
@@ -1113,16 +1210,20 @@ void onWiFiEvent(WiFiEvent_t e, WiFiEventInfo_t info) {
 }
 
 void bringUpWifi() {
-  WiFi.persistent(false);
+  WiFi.persistent(true);
   WiFi.setSleep(false);
   WiFi.mode(WIFI_AP_STA);
-  WiFi.setAutoReconnect(false);
+  WiFi.setAutoReconnect(true);
   WiFi.setHostname(gHostname.c_str());
 
   startAPIfNeeded("Boot");
 
   if (staHaveCreds) {
+    applyNetworkConfig();
     staConnecting = true;
+    wifiReconnectAtMs = 0;
+    wifiReconnectInterval = WIFI_RECONNECT_INTERVAL;
+    wifiReconnectAttempts = 0;
     Serial.printf("[STA] Connecting to \"%s\"\n", staSsid.c_str());
     WiFi.begin(staSsid.c_str(), staPass.c_str());
   }
@@ -1142,13 +1243,21 @@ void factoryResetNow(const char* reason) {
   prefs.remove("pin");
   prefs.end();
   
-  // Clear stored commands
+  prefs.begin("network", false);
+  prefs.clear();
+  prefs.end();
+  
   prefs.begin("rf_cmd", false);
   prefs.clear();
   prefs.end();
   
   prefs.begin("ir_cmd", false);
   prefs.clear();
+  prefs.end();
+  
+  prefs.begin("boot", false);
+  prefs.putUInt("count", 0);
+  prefs.putBool("stable", true);
   prefs.end();
   
   gAuthToken = "";
@@ -1159,6 +1268,8 @@ void factoryResetNow(const char* reason) {
   WiFi.disconnect(true, true);
   delay(200);
   ESP.restart();
+
+
 }
 
 void pollFactoryButton() {
@@ -1356,7 +1467,6 @@ static void broadcastIR(uint32_t gap_ms) {
   if (!haveIrA) return;
   uint32_t gap_us = gap_ms * 1000UL;
 
-  // Build combined data
   if (haveIrB)
     buildCombined(irA, irAc, irB, irBc, gap_us, irC, irCc, IR_RAW_MAX);
   else {
@@ -1364,18 +1474,15 @@ static void broadcastIR(uint32_t gap_ms) {
     for (size_t i = 0; i < irAc; i++) irC[i] = irA[i];
   }
   
-  // ✅ CRITICAL: Store ALL frames in persistent variables
   lastIrFreqHz = irFreqHz;
   lastIrDuty = irDuty;
   
-  // Save Frame A
   lastIrCountA = min(irAc, (size_t)MAX_IR_RAW_STORE);
   for (size_t i = 0; i < lastIrCountA; i++) {
     lastIrDataA[i] = irA[i];
   }
   hasLastIrDataA = true;
   
-  // Save Frame B (if exists)
   if (haveIrB) {
     lastIrCountB = min(irBc, (size_t)MAX_IR_RAW_STORE);
     for (size_t i = 0; i < lastIrCountB; i++) {
@@ -1387,14 +1494,12 @@ static void broadcastIR(uint32_t gap_ms) {
     hasLastIrDataB = false;
   }
   
-  // Save Combined Frame
   lastIrCountC = min(irCc, (size_t)MAX_IR_RAW_STORE);
   for (size_t i = 0; i < lastIrCountC; i++) {
     lastIrDataC[i] = irC[i];
   }
   hasLastIrDataC = true;
   
-  // Legacy support - default to combined
   lastIrCount = lastIrCountC;
   for (size_t i = 0; i < lastIrCountC; i++) {
     lastIrData[i] = lastIrDataC[i];
@@ -1437,6 +1542,10 @@ static void broadcastIR(uint32_t gap_ms) {
   if (haveIrB) doc["frameB"] = irB_csv;
 
   serializeJson(doc, lastIrJson);
+  
+  // Broadcast to WebSocket clients
+  broadcastWebSocket(lastIrJson);
+  
   Serial.printf("[IR] JSON: %d frames, %d combined timings\n", haveIrB ? 2 : 1, irCc);
 }
 
@@ -1554,7 +1663,19 @@ static void loadOtaCfg() {
   otaCfg.autoInstall = prefs.getBool("autoInst", false);
   otaCfg.intervalMin = prefs.getUInt("interval", 360);
   otaCfg.allowInsecureTLS = prefs.getBool("insecure", true);
-  prefs.end();
+  if (otaCfg.manifestUrl.length() == 0) {
+    otaCfg.manifestUrl = DEFAULT_MANIFEST_URL;
+    Serial.println("[OTA] Using default manifest URL");
+    
+    // Save the default URL to preferences
+    prefs.begin("ota", false);
+    prefs.putString("manifest", otaCfg.manifestUrl);
+    prefs.end();
+    
+    Serial.printf("[OTA] Default manifest URL saved: %s\n", otaCfg.manifestUrl.c_str());
+  } else {
+    Serial.printf("[OTA] Loaded manifest URL: %s\n", otaCfg.manifestUrl.c_str());
+  }
 }
 
 static void saveOtaCfg() {
@@ -1622,9 +1743,11 @@ static void otaProgressCb(size_t prgs, size_t total) {
   }
 }
 
+// ========== NEW CHUNKED OTA FUNCTION ==========
 static bool doHttpOtaUrl(const String& url, const String& md5hex, String& errOut, uint32_t& writtenOut) {
   writtenOut = 0;
   errOut = "";
+  
   if (WiFi.status() != WL_CONNECTED) {
     errOut = "wifi_not_connected";
     return false;
@@ -1633,8 +1756,17 @@ static bool doHttpOtaUrl(const String& url, const String& md5hex, String& errOut
   otaInProgress = true;
   Update.onProgress(otaProgressCb);
 
+  // ✅ CRITICAL: Print partition info BEFORE starting
+  Serial.println("\n[OTA] ========== PARTITION INFO ==========");
+  Serial.printf("[OTA] Sketch size: %u bytes\n", ESP.getSketchSize());
+  Serial.printf("[OTA] Free sketch space: %u bytes\n", ESP.getFreeSketchSpace());
+  Serial.printf("[OTA] Flash size: %u bytes\n", ESP.getFlashChipSize());
+  Serial.printf("[OTA] Free heap: %u bytes\n", ESP.getFreeHeap());
+  Serial.println("[OTA] ==========================================\n");
+
   WiFiClientSecure wcs;
   HTTPClient http;
+  
   if (!httpBeginAuth(http, wcs, url)) {
     errOut = "http_begin_failed";
     otaInProgress = false;
@@ -1643,6 +1775,7 @@ static bool doHttpOtaUrl(const String& url, const String& md5hex, String& errOut
 
   Serial.printf("[OTA] GET %s\n", url.c_str());
   int code = http.GET();
+  
   if (code != HTTP_CODE_OK) {
     errOut = String("http_err_") + code;
     http.end();
@@ -1650,45 +1783,150 @@ static bool doHttpOtaUrl(const String& url, const String& md5hex, String& errOut
     return false;
   }
 
-  int64_t contentLen = http.getSize();
-  Serial.printf("[OTA] HTTP %d, len=%lld\n", code, (long long)contentLen);
+  int contentLen = http.getSize();
+  Serial.printf("[OTA] HTTP %d, firmware size=%d bytes\n", code, contentLen);
 
-  if (!Update.begin(contentLen > 0 ? contentLen : UPDATE_SIZE_UNKNOWN)) {
-    errOut = String("update_begin_failed_") + Update.getError();
+  if (contentLen <= 0) {
+    errOut = "invalid_content_length";
     http.end();
     otaInProgress = false;
     return false;
   }
-  setUpdateMD5IfAny(md5hex);
 
+  // ✅ CHECK: Do we have enough space?
+  if (contentLen > ESP.getFreeSketchSpace()) {
+    errOut = String("firmware_too_large_") + contentLen + "_max_" + ESP.getFreeSketchSpace();
+    Serial.printf("[OTA] ERROR: Firmware (%d bytes) larger than available OTA space (%u bytes)\n", 
+                  contentLen, ESP.getFreeSketchSpace());
+    http.end();
+    otaInProgress = false;
+    return false;
+  }
+
+  // ✅ BEGIN UPDATE with explicit partition
+  Serial.printf("[OTA] Calling Update.begin(%d, U_FLASH)...\n", contentLen);
+  
+  if (!Update.begin(contentLen, U_FLASH)) {
+    // Get detailed error
+    int updateError = Update.getError();
+    errOut = String("update_begin_failed_code_") + updateError;
+    
+    Serial.println("[OTA] ✗✗✗ Update.begin() FAILED ✗✗✗");
+    Serial.printf("[OTA] Error code: %d\n", updateError);
+    Serial.printf("[OTA] Error string: %s\n", Update.errorString());
+    
+    http.end();
+    otaInProgress = false;
+    return false;
+  }
+  
+  Serial.println("[OTA] ✓ Update.begin() successful");
+  
+  // Set MD5 if provided
+  if (md5hex.length() == 32) {
+    Update.setMD5(md5hex.c_str());
+    Serial.printf("[OTA] MD5 verification enabled: %s\n", md5hex.c_str());
+  }
+
+  // ✅ CHUNKED WRITING with detailed error checking
   WiFiClient& stream = http.getStream();
-  size_t written = Update.writeStream(stream);
-  Serial.printf("[OTA] Written %u bytes\n", (unsigned)written);
+  uint8_t buff[512];
+  size_t written = 0;
+  uint32_t lastProgressMs = millis();
+  
+  Serial.println("[OTA] Starting chunked download...");
+  
+  while (http.connected() && (written < contentLen)) {
+    size_t available = stream.available();
+    
+    if (available) {
+      // Read chunk
+      size_t toRead = min(available, sizeof(buff));
+      size_t bytesRead = stream.readBytes(buff, toRead);
+      
+      if (bytesRead > 0) {
+        // ✅ WRITE with error checking
+        size_t bytesWritten = Update.write(buff, bytesRead);
+        
+        if (bytesWritten != bytesRead) {
+          // ✗ WRITE FAILED - Get detailed error
+          int updateError = Update.getError();
+          errOut = String("write_failed_err") + updateError + "_wrote_" + bytesWritten + "_of_" + bytesRead;
+          
+          Serial.println("\n[OTA] ✗✗✗ WRITE FAILED ✗✗✗");
+          Serial.printf("[OTA] Attempted to write: %u bytes\n", bytesRead);
+          Serial.printf("[OTA] Actually written: %u bytes\n", bytesWritten);
+          Serial.printf("[OTA] Update error code: %d\n", updateError);
+          Serial.printf("[OTA] Error string: %s\n", Update.errorString());
+          Serial.printf("[OTA] Total written so far: %u / %d\n", written, contentLen);
+          
+          Update.abort();
+          http.end();
+          otaInProgress = false;
+          return false;
+        }
+        
+        written += bytesWritten;
+        
+        // Print progress every 2 seconds or 100KB
+        if ((millis() - lastProgressMs > 2000) || (written % 102400 < 512)) {
+          Serial.printf("[OTA] Progress: %u / %d (%d%%) - Heap: %u\n", 
+                        written, contentLen, (written * 100) / contentLen, 
+                        ESP.getFreeHeap());
+          lastProgressMs = millis();
+        }
+      }
+      
+      yield();
+    } else {
+      delay(1);
+    }
+  }
 
-  if (contentLen > 0 && written != (size_t)contentLen) {
-    errOut = "short_write";
+  Serial.printf("\n[OTA] Download complete: %u bytes written\n", written);
+
+  // ✅ VERIFY complete download
+  if (written != contentLen) {
+    errOut = String("incomplete_download_got_") + written + "_expected_" + contentLen;
+    Serial.printf("[OTA] ERROR: %s\n", errOut.c_str());
     Update.abort();
     http.end();
     otaInProgress = false;
     return false;
   }
-  if (!Update.end()) {
-    errOut = String("update_end_failed_") + Update.getError();
+
+  // ✅ FINALIZE update
+  Serial.println("[OTA] Calling Update.end()...");
+  if (!Update.end(true)) {  // true = set new partition as boot
+    int updateError = Update.getError();
+    errOut = String("update_end_failed_code_") + updateError;
+    
+    Serial.println("[OTA] ✗✗✗ Update.end() FAILED ✗✗✗");
+    Serial.printf("[OTA] Error code: %d\n", updateError);
+    Serial.printf("[OTA] Error string: %s\n", Update.errorString());
+    
     http.end();
     otaInProgress = false;
     return false;
   }
+
+  // ✅ VERIFY finished
   if (!Update.isFinished()) {
     errOut = "update_not_finished";
+    Serial.println("[OTA] ERROR: Update not finished");
     http.end();
     otaInProgress = false;
     return false;
   }
 
   http.end();
-
-  writtenOut = (uint32_t)written;
-  Serial.println("[OTA] SUCCESS. Rebooting...");
+  writtenOut = written;
+  
+  Serial.println("\n╔═══════════════════════════════════════╗");
+  Serial.println("║  ✓✓✓ OTA UPDATE SUCCESSFUL ✓✓✓       ║");
+  Serial.printf("║  Wrote %u bytes to flash             ║\n", written);
+  Serial.println("╚═══════════════════════════════════════╝\n");
+  
   otaInProgress = false;
   return true;
 }
@@ -1787,6 +2025,9 @@ void rfBroadcast(uint32_t code, uint8_t bits, uint8_t proto, uint16_t pulselen) 
   d["count"] = rfRxCount;
 
   serializeJson(d, lastRfJson);
+  
+  // Broadcast to WebSocket clients
+  broadcastWebSocket(lastRfJson);
 
   Serial.printf("[RF] RX #%u: Code=%u, Bits=%u, Proto=%u, Pulse=%u\n",
                 rfRxCount, code, bits, proto, pulselen);
@@ -1828,12 +2069,120 @@ void testRfHardware() {
 
 // ========== HTTP HANDLERS ==========
 
+// Network Configuration Handlers
+void handleNetworkConfigGet() {
+  addCORS();
+  if (!requireAuth()) return;
+  
+  DynamicJsonDocument doc(512);
+  doc["use_static_ip"] = netConfig.useStaticIP;
+  
+  if (netConfig.useStaticIP && netConfig.staticIP != IPAddress(0, 0, 0, 0)) {
+    doc["static_ip"] = netConfig.staticIP.toString();
+    doc["gateway"] = netConfig.gateway.toString();
+    doc["subnet"] = netConfig.subnet.toString();
+    doc["dns1"] = netConfig.dns1.toString();
+    doc["dns2"] = netConfig.dns2.toString();
+  }
+  
+  doc["current_ip"] = WiFi.localIP().toString();
+  //doc["gateway"] = WiFi.localIP().toString();
+  doc["connected"] = staConnected;
+  
+  String output;
+  serializeJson(doc, output);
+  server.send(200, "application/json", output);
+}
+
+void handleNetworkConfigSet() {
+  addCORS();
+  if (!requireAuth()) return;
+  
+  if (!server.hasArg("plain")) {
+    server.send(200, "application/json", "{\"error\":\"Missing JSON body\"}");
+    return;
+  }
+  
+  DynamicJsonDocument doc(1024);
+  if (deserializeJson(doc, server.arg("plain"))) {
+    server.send(200, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  
+  bool useStatic = doc["use_static_ip"] | false;
+  netConfig.useStaticIP = useStatic;
+  
+  if (useStatic) {
+    String ip = doc["static_ip"] | "";
+    String gw = doc["gateway"] | "";
+    String sn = doc["subnet"] | "255.255.255.0";
+    String d1 = doc["dns1"] | "8.8.8.8";
+    String d2 = doc["dns2"] | "8.8.4.4";
+    
+    if (ip.length() == 0 || gw.length() == 0) {
+      server.send(200, "application/json", "{\"error\":\"Missing IP or gateway\"}");
+      return;
+    }
+    
+    IPAddress staticIP, gateway, subnet, dns1, dns2;
+    
+    if (!staticIP.fromString(ip) || !gateway.fromString(gw) || 
+        !subnet.fromString(sn) || !dns1.fromString(d1) || !dns2.fromString(d2)) {
+      server.send(200, "application/json", "{\"error\":\"Invalid IP format\"}");
+      return;
+    }
+    
+    netConfig.staticIP = staticIP;
+    netConfig.gateway = gateway;
+    netConfig.subnet = subnet;
+    netConfig.dns1 = dns1;
+    netConfig.dns2 = dns2;
+    
+    Serial.println("[NET] Static IP configuration set:");
+    Serial.printf("  IP: %s\n", staticIP.toString().c_str());
+    Serial.printf("  Gateway: %s\n", gateway.toString().c_str());
+    Serial.printf("  Subnet: %s\n", subnet.toString().c_str());
+    Serial.printf("  DNS1: %s\n", dns1.toString().c_str());
+    Serial.printf("  DNS2: %s\n", dns2.toString().c_str());
+  } else {
+    Serial.println("[NET] DHCP mode enabled");
+  }
+  
+  saveNetworkConfig();
+
+  // Apply immediately: reconnect STA with new config.
+  // (Without this, user can lose reachability after changing IP mode.)
+  if (staHaveCreds) {
+    Serial.println("[NET] Applying network config (reconnect)...");
+    staConnected = false;
+    staConnecting = false;
+    wifiReconnectAtMs = 0;
+    wifiReconnectAttempts = 0;
+    wifiReconnectInterval = WIFI_RECONNECT_INTERVAL;
+
+    WiFi.disconnect(false); // keep credentials
+    delay(150);
+    applyNetworkConfig();
+    WiFi.begin(staSsid.c_str(), staPass.c_str());
+    staConnecting = true;
+  }
+  
+  DynamicJsonDocument resp(256);
+  resp["ok"] = true;
+  resp["use_static_ip"] = netConfig.useStaticIP;
+  resp["message"] = "Configuration saved and reconnect initiated.";
+  
+  String output;
+  serializeJson(resp, output);
+  server.send(200, "application/json", output);
+}
+
 // Challenge-Response Auth Handlers
 void handleChallengeSetup() {
   addCORS();
 
   if (pinConfigured) {
-    server.send(400, "application/json", "{\"error\":\"pin_already_configured\"}");
+    server.send(200, "application/json", "{\"error\":\"pin_already_configured\"}");
     return;
   }
 
@@ -1852,13 +2201,13 @@ void handleChallengeSetup() {
   pin.trim();
 
   if (pin.length() < 4 || pin.length() > 8) {
-    server.send(400, "application/json", "{\"error\":\"invalid_pin_length\"}");
+    server.send(200, "application/json", "{\"error\":\"invalid_pin_length\"}");
     return;
   }
 
   for (size_t i = 0; i < pin.length(); i++) {
     if (!isdigit(pin[i])) {
-      server.send(400, "application/json", "{\"error\":\"invalid_pin_format\"}");
+      server.send(200, "application/json", "{\"error\":\"invalid_pin_format\"}");
       return;
     }
   }
@@ -1880,7 +2229,7 @@ void handleChallengeGet() {
   addCORS();
 
   if (!pinConfigured) {
-    server.send(400, "application/json", "{\"error\":\"pin_not_configured\"}");
+    server.send(200, "application/json", "{\"error\":\"pin_not_configured\"}");
     return;
   }
 
@@ -1906,7 +2255,7 @@ void handleChallengeVerify() {
   addCORS();
 
   if (!pinConfigured) {
-    server.send(400, "application/json", "{\"error\":\"pin_not_configured\"}");
+    server.send(200, "application/json", "{\"error\":\"pin_not_configured\"}");
     return;
   }
 
@@ -1928,7 +2277,7 @@ void handleChallengeVerify() {
   response.trim();
 
   if (challenge.length() != CHALLENGE_DIGITS || response.length() != CHALLENGE_DIGITS) {
-    server.send(400, "application/json", "{\"error\":\"invalid_format\"}");
+    server.send(200, "application/json", "{\"error\":\"invalid_format\"}");
     return;
   }
 
@@ -1950,7 +2299,7 @@ void handleChallengeVerify() {
 
     Serial.println("[AUTH] ✓ Challenge verified");
   } else {
-    server.send(401, "application/json", "{\"ok\":false,\"valid\":false,\"error\":\"invalid_response\"}");
+    server.send(200, "application/json", "{\"ok\":false,\"valid\":false,\"error\":\"invalid_response\"}");
   }
 }
 
@@ -1997,7 +2346,7 @@ void handleRfSave() {
 
   if (lastRfCode == 0) {
     Serial.println("[RF] ERROR: No RF data captured yet");
-    server.send(404, "application/json", "{\"error\":\"no_rf_received_yet\"}");
+    server.send(200, "application/json", "{\"error\":\"no_rf_received_yet\"}");
     return;
   }
 
@@ -2017,7 +2366,7 @@ void handleRfSave() {
 
   if (name.length() == 0) {
     Serial.println("[RF] ERROR: Missing name");
-    server.send(400, "application/json", "{\"error\":\"missing_name\"}");
+    server.send(200, "application/json", "{\"error\":\"missing_name\"}");
     return;
   }
 
@@ -2038,7 +2387,7 @@ void handleRfSave() {
     server.send(200, "application/json", out);
   } else {
     Serial.println("[RF] ERROR: Save failed");
-    server.send(500, "application/json", "{\"error\":\"save_failed\"}");
+    server.send(200, "application/json", "{\"error\":\"save_failed\"}");
   }
 }
 
@@ -2071,7 +2420,7 @@ void handleRfSendByName() {
 
   if (name.length() == 0) {
     Serial.println("[RF] ERROR: Missing name for send");
-    server.send(400, "application/json", "{\"error\":\"missing_name\"}");
+    server.send(200, "application/json", "{\"error\":\"missing_name\"}");
     return;
   }
 
@@ -2080,7 +2429,7 @@ void handleRfSendByName() {
   RfCommand cmd;
   if (!loadRfCommand(name, cmd)) {
     Serial.printf("[RF] ERROR: Command '%s' not found\n", name.c_str());
-    server.send(404, "application/json", "{\"error\":\"command_not_found\"}");
+    server.send(200, "application/json", "{\"error\":\"command_not_found\"}");
     return;
   }
 
@@ -2125,7 +2474,7 @@ void handleRfDelete() {
 
   if (name.length() == 0) {
     Serial.println("[RF] ERROR: Missing name for delete");
-    server.send(400, "application/json", "{\"error\":\"missing_name\"}");
+    server.send(200, "application/json", "{\"error\":\"missing_name\"}");
     return;
   }
 
@@ -2145,26 +2494,48 @@ void handleRfDelete() {
     Serial.printf("[RF] ✓ Deleted '%s'\n", sanitizeName(name).c_str());
   } else {
     Serial.printf("[RF] ERROR: Command '%s' not found\n", name.c_str());
-    server.send(404, "application/json", "{\"error\":\"command_not_found\"}");
+    server.send(200, "application/json", "{\"error\":\"command_not_found\"}");
   }
 }
 
-// ========== IR COMMAND STORAGE HANDLERS (FIXED) ==========
+
+// ========== FACTORY RESET HANDLER ==========
+void handleFactoryReset() {
+  addCORS();
+  if (!requireAuth()) return;
+  
+  // Send response before resetting
+  DynamicJsonDocument doc(256);
+  doc["ok"] = true;
+  doc["message"] = "Factory reset initiated. Device will restart in AP mode with new token.";
+  
+  String json;
+  serializeJson(doc, json);
+  server.send(200, "application/json", json);
+  
+  // Allow response to be sent
+  delay(500);
+  
+  // Perform factory reset
+  factoryResetNow("API_request");
+}
+
+
+// ========== IR COMMAND STORAGE HANDLERS ==========
 
 void handleIrSave() {
   addCORS();
   if (!requireAuth()) return;
 
-  // ✅ Check if we have any captured data
   if (!hasLastIrDataA && !hasLastIrDataB && !hasLastIrDataC) {
     Serial.println("[IR] ERROR: No IR data captured yet");
-    server.send(404, "application/json", 
+    server.send(200, "application/json", 
       "{\"error\":\"no_ir_received_yet\",\"message\":\"Please capture an IR signal first using /api/ir/last\"}");
     return;
   }
 
   String name = "";
-  String frameType = "combined"; // Default to combined
+  String frameType = "combined";
 
   if (server.hasArg("plain")) {
     DynamicJsonDocument doc(512);
@@ -2189,18 +2560,17 @@ void handleIrSave() {
 
   if (name.length() == 0) {
     Serial.println("[IR] ERROR: Missing name");
-    server.send(400, "application/json", "{\"error\":\"missing_name\"}");
+    server.send(200, "application/json", "{\"error\":\"missing_name\"}");
     return;
   }
 
-  // Determine which frame to save
   uint32_t* dataToSave = nullptr;
   uint16_t countToSave = 0;
   String actualFrame = "";
 
   if (frameType == "a" || frameType == "framea") {
     if (!hasLastIrDataA) {
-      server.send(404, "application/json", 
+      server.send(200, "application/json", 
         "{\"error\":\"frame_a_not_available\",\"message\":\"Frame A was not captured\"}");
       return;
     }
@@ -2210,7 +2580,8 @@ void handleIrSave() {
     
   } else if (frameType == "b" || frameType == "frameb") {
     if (!hasLastIrDataB) {
-      server.send(404, "application/json", 
+      server.send
+      (200, "application/json", 
         "{\"error\":\"frame_b_not_available\",\"message\":\"Frame B was not captured (single-frame capture)\"}");
       return;
     }
@@ -2220,7 +2591,7 @@ void handleIrSave() {
     
   } else if (frameType == "c" || frameType == "combined" || frameType == "framec") {
     if (!hasLastIrDataC) {
-      server.send(404, "application/json", 
+      server.send(200, "application/json", 
         "{\"error\":\"combined_frame_not_available\",\"message\":\"Combined frame was not created\"}");
       return;
     }
@@ -2229,7 +2600,7 @@ void handleIrSave() {
     actualFrame = "Combined";
     
   } else {
-    server.send(400, "application/json", 
+    server.send(200, "application/json", 
       "{\"error\":\"invalid_frame\",\"message\":\"Frame must be 'A', 'B', or 'combined'\"}");
     return;
   }
@@ -2272,16 +2643,16 @@ void handleIrSave() {
     errorMsg += String(MAX_IR_COMMANDS);
     errorMsg += "}";
     
-    server.send(500, "application/json", errorMsg);
+    server.send(200, "application/json", errorMsg);
   }
 }
+
 void handleStorageInfo() {
   addCORS();
   if (!requireAuth()) return;
   
   DynamicJsonDocument doc(768);
   
-  // RF Storage
   prefs.begin("rf_cmd", true);
   int rfCount = prefs.getInt("count", 0);
   prefs.end();
@@ -2291,7 +2662,6 @@ void handleStorageInfo() {
   rf["max"] = MAX_RF_COMMANDS;
   rf["available"] = MAX_RF_COMMANDS - rfCount;
   
-  // IR Storage
   prefs.begin("ir_cmd", true);
   int irCount = prefs.getInt("count", 0);
   prefs.end();
@@ -2301,7 +2671,6 @@ void handleStorageInfo() {
   ir["max"] = MAX_IR_COMMANDS;
   ir["available"] = MAX_IR_COMMANDS - irCount;
   
-  // Capture status for each frame
   JsonObject capture = ir.createNestedObject("captured");
   capture["frame_a"] = hasLastIrDataA;
   capture["frame_b"] = hasLastIrDataB;
@@ -2310,7 +2679,6 @@ void handleStorageInfo() {
   capture["count_b"] = lastIrCountB;
   capture["count_combined"] = lastIrCountC;
   
-  // Flash info
   if (ESP.getFlashChipSize() > 0) {
     doc["flash_size"] = ESP.getFlashChipSize();
   }
@@ -2319,6 +2687,7 @@ void handleStorageInfo() {
   serializeJson(doc, output);
   server.send(200, "application/json", output);
 }
+
 void handleClearRfStorage() {
   addCORS();
   if (!requireAuth()) return;
@@ -2372,7 +2741,7 @@ void handleIrSendByName() {
 
   if (name.length() == 0) {
     Serial.println("[IR] ERROR: Missing name for send");
-    server.send(400, "application/json", "{\"error\":\"missing_name\"}");
+    server.send(200, "application/json", "{\"error\":\"missing_name\"}");
     return;
   }
 
@@ -2381,17 +2750,13 @@ void handleIrSendByName() {
   IrCommand cmd;
   if (!loadIrCommand(name, cmd)) {
     Serial.printf("[IR] ERROR: Command '%s' not found\n", name.c_str());
-    server.send(404, "application/json", "{\"error\":\"command_not_found\"}");
+    server.send(200, "application/json", "{\"error\":\"command_not_found\"}");
     return;
   }
 
   Serial.printf("[IR] Sending '%s': freq=%u Hz, duty=%u%%, count=%u\n",
                 cmd.name, cmd.freqHz, cmd.duty, cmd.count);
 
-  // Decompress the stored 16‑bit durations into a 32‑bit array before
-  // transmission.  Each stored value represents a microsecond count divided
-  // by IR_STORE_DIV.  We multiply by IR_STORE_DIV to restore the
-  // approximate original durations.
   uint32_t tmpRaw[MAX_IR_RAW_STORE];
   for (uint16_t i = 0; i < cmd.count && i < MAX_IR_RAW_STORE; i++) {
     tmpRaw[i] = (uint32_t)cmd.raw[i] * IR_STORE_DIV;
@@ -2413,7 +2778,7 @@ void handleIrSendByName() {
     Serial.printf("[IR] ✓ Sent '%s' successfully\n", cmd.name);
   } else {
     Serial.printf("[IR] ERROR: Failed to send '%s'\n", cmd.name);
-    server.send(500, "application/json", "{\"error\":\"send_failed\"}");
+    server.send(200, "application/json", "{\"error\":\"send_failed\"}");
   }
 }
 
@@ -2437,7 +2802,7 @@ void handleIrDelete() {
 
   if (name.length() == 0) {
     Serial.println("[IR] ERROR: Missing name for delete");
-    server.send(400, "application/json", "{\"error\":\"missing_name\"}");
+    server.send(200, "application/json", "{\"error\":\"missing_name\"}");
     return;
   }
 
@@ -2457,7 +2822,7 @@ void handleIrDelete() {
     Serial.printf("[IR] ✓ Deleted '%s'\n", sanitizeName(name).c_str());
   } else {
     Serial.printf("[IR] ERROR: Command '%s' not found\n", name.c_str());
-    server.send(404, "application/json", "{\"error\":\"command_not_found\"}");
+    server.send(200, "application/json", "{\"error\":\"command_not_found\"}");
   }
 }
 
@@ -2472,7 +2837,7 @@ void handleApDisable() {
   if (!requireAuth()) return;
 
   if (WiFi.status() != WL_CONNECTED) {
-    server.send(400, "application/json", "{\"error\":\"sta_not_connected\"}");
+    server.send(200, "application/json", "{\"error\":\"sta_not_connected\"}");
     return;
   }
 
@@ -2513,6 +2878,8 @@ void handleStatus() {
   d["fw_ver"] = FIRMWARE_VERSION;
   d["has_ir_data"] = hasLastIrData;
   d["last_ir_count"] = lastIrCount;
+  d["websocket_port"] = 81;
+  d["use_static_ip"] = netConfig.useStaticIP;
 
   if (apEnabled && gAuthTokenSet) {
     d["token"] = gAuthToken;
@@ -2537,7 +2904,7 @@ void handleStatus() {
 void handleGetToken() {
   addCORS();
   if (!isAPOn()) {
-    server.send(404, "application/json", "{\"error\":\"not_in_ap_mode\"}");
+    server.send(200, "application/json", "{\"error\":\"not_in_ap_mode\"}");
     return;
   }
   if (!gAuthTokenSet) authCreateNewToken("lazy_init");
@@ -2580,12 +2947,12 @@ void handleSetHostname() {
   addCORS();
   String newHost, newInst;
   if (!parseHostnameBody(newHost, newInst)) {
-    server.send(400, "application/json", "{\"error\":\"Missing hostname\"}");
+    server.send(200, "application/json", "{\"error\":\"Missing hostname\"}");
     return;
   }
   newHost.toLowerCase();
   if (!validHostname(newHost)) {
-    server.send(400, "application/json", "{\"error\":\"Invalid hostname\"}");
+    server.send(200, "application/json", "{\"error\":\"Invalid hostname\"}");
     return;
   }
   if (newInst.isEmpty()) newInst = gInstance;
@@ -2635,7 +3002,7 @@ void handleWifiSave() {
 
   ssid.trim();
   if (ssid == "") {
-    server.send(400, "application/json", "{\"error\":\"missing ssid\"}");
+    server.send(200, "application/json", "{\"error\":\"missing ssid\"}");
     return;
   }
 
@@ -2644,6 +3011,9 @@ void handleWifiSave() {
 
   WiFi.disconnect(true, true);
   delay(50);
+  
+  applyNetworkConfig();
+  
   WiFi.begin(ssid.c_str(), pass.c_str());
   staConnecting = true;
   staConnected = false;
@@ -2754,12 +3124,12 @@ void handleIrTest() {
 void handleIRSend() {
   addCORS();
   if (!server.hasArg("plain")) {
-    server.send(400, "application/json", "{\"error\":\"Missing JSON body\"}");
+    server.send(200, "application/json", "{\"error\":\"Missing JSON body\"}");
     return;
   }
   DynamicJsonDocument doc(16384);
   if (deserializeJson(doc, server.arg("plain"))) {
-    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    server.send(200, "application/json", "{\"error\":\"Invalid JSON\"}");
     return;
   }
   uint32_t freqHz = doc.containsKey("freq_khz") ? (uint32_t)doc["freq_khz"].as<uint32_t>() * 1000UL : (uint32_t)38000;
@@ -2767,7 +3137,7 @@ void handleIRSend() {
   uint16_t repeat = doc["repeat"] | 1;
   JsonArray raw = doc["raw"].as<JsonArray>();
   if (raw.isNull() || raw.size() == 0) {
-    server.send(400, "application/json", "{\"error\":\"Missing raw array\"}");
+    server.send(200, "application/json", "{\"error\":\"Missing raw array\"}");
     return;
   }
   size_t n = min((size_t)raw.size(), (size_t)IR_RAW_MAX);
@@ -2788,13 +3158,13 @@ void handleIRSend() {
     serializeJson(resp, out);
     server.send(200, "application/json", out);
   } else
-    server.send(500, "application/json", "{\"error\":\"IR send failed\"}");
+    server.send(200, "application/json", "{\"error\":\"IR send failed\"}");
 }
 
 void handleIrLast() {
   addCORS();
   if (lastIrJson.length() == 0)
-    server.send(404, "application/json", "{\"error\":\"no_capture_yet\"}");
+    server.send(200, "application/json", "{\"error\":\"no_capture_yet\"}");
   else
     server.send(200, "application/json", lastIrJson);
 }
@@ -2815,15 +3185,18 @@ void handleRxInfo() {
 
 void handleOtaStatus() {
   addCORS();
-  DynamicJsonDocument d(320);
-  d["in_progress"] = otaInProgress;
-  d["last_ok"] = otaLastOk;
-  d["last_bytes"] = otaLastBytes;
-  d["last_err"] = otaLastErr;
-  d["fw_ver"] = FIRMWARE_VERSION;
-  String out;
-  serializeJson(d, out);
-  server.send(200, "application/json", out);
+  
+  // ✅ Use minimal heap - String concatenation instead of JSON library
+  String response = "{";
+  response += "\"in_progress\":" + String(otaInProgress ? "true" : "false") + ",";
+  response += "\"last_ok\":" + String(otaLastOk ? "true" : "false") + ",";
+  response += "\"last_bytes\":" + String(otaLastBytes) + ",";
+  response += "\"last_err\":\"" + otaLastErr + "\",";
+  response += "\"fw_ver\":\"" + String(FIRMWARE_VERSION) + "\",";
+  response += "\"free_heap\":" + String(ESP.getFreeHeap());
+  response += "}";
+  
+  server.send(200, "application/json", response);
 }
 
 void handleOtaGetCfg() {
@@ -2839,42 +3212,77 @@ void handleOtaGetCfg() {
 
 void handleOtaSetCfg() {
   addCORS();
+
   if (!server.hasArg("plain")) {
-    server.send(400, "application/json", "{\"error\":\"Missing JSON\"}");
+    server.send(200, "application/json", "{\"error\":\"Missing JSON\"}");
     return;
   }
+
   DynamicJsonDocument doc(1024);
   if (deserializeJson(doc, server.arg("plain"))) {
-    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    server.send(200, "application/json", "{\"error\":\"Invalid JSON\"}");
     return;
   }
-  if (doc.containsKey("manifest_url")) otaCfg.manifestUrl = String(doc["manifest_url"].as<const char*>());
-  if (doc.containsKey("auto_check")) otaCfg.autoCheck = (bool)doc["auto_check"];
-  if (doc.containsKey("auto_install")) otaCfg.autoInstall = (bool)doc["auto_install"];
+
+  // Force default URL – ignore API input
+  otaCfg.manifestUrl = DEFAULT_MANIFEST_URL;
+
+  if (doc.containsKey("auto_check")) 
+    otaCfg.autoCheck = (bool)doc["auto_check"];
+
+  if (doc.containsKey("auto_install")) 
+    otaCfg.autoInstall = (bool)doc["auto_install"];
+
   saveOtaCfg();
+
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
+
 void handleOtaManifest() {
   addCORS();
+  
   if (WiFi.status() != WL_CONNECTED) {
-    server.send(503, "application/json", "{\"ok\":false,\"error\":\"wifi_not_connected\"}");
+    server.send(200, "application/json", "{\"ok\":false,\"error\":\"wifi_not_connected\"}");
     return;
   }
 
   Manifest m;
   String err;
+  
   if (!fetchManifest(m, err)) {
-    server.send(200, "application/json", "{\"ok\":false,\"error\":\"manifest_fetch_failed\"}");
+    // Use minimal JSON for errors
+    server.send(200, "application/json", 
+      "{\"ok\":false,\"error\":\"manifest_fetch_failed\",\"detail\":\"" + err + "\"}");
     return;
   }
 
   bool needsUpdate = (cmpSemver(m.version, FIRMWARE_VERSION) > 0) || m.force;
-
-  String jsonResp = "{\"ok\":true,\"version\":\"" + m.version + "\",\"update_available\":" + String(needsUpdate ? "true" : "false") + "}";
-  server.send(200, "application/json", jsonResp);
+  String fwUrl = m.url.length() ? m.url : resolveRelative(otaCfg.manifestUrl, m.file);
+  
+  // ✅ Build response with MINIMAL heap usage
+  // Use String concatenation instead of DynamicJsonDocument
+  String response = "{";
+  response += "\"ok\":true,";
+  response += "\"version\":\"" + m.version + "\",";
+  response += "\"update_available\":" + String(needsUpdate ? "true" : "false") + ",";
+  response += "\"current_version\":\"" + String(FIRMWARE_VERSION) + "\",";
+  response += "\"url\":\"" + fwUrl + "\",";
+  response += "\"size\":" + String(m.size) + ",";
+  response += "\"md5\":\"" + m.md5 + "\",";  // ← MD5 for validation!
+  response += "\"force\":" + String(m.force ? "true" : "false") + ",";
+  response += "\"notes\":\"" + m.notes + "\",";
+  response += "\"min_version\":\"" + m.min + "\"";
+  response += "}";
+  
+  server.send(200, "application/json", response);
+  
+  Serial.printf("[OTA] Manifest: v%s -> v%s (Update: %s)\n", 
+                FIRMWARE_VERSION, m.version.c_str(), 
+                needsUpdate ? "YES" : "NO");
+  Serial.printf("[OTA] URL: %s\n", fwUrl.c_str());
+  Serial.printf("[OTA] MD5: %s\n", m.md5.c_str());
 }
-
 void handleOtaCheck() {
   addCORS();
   HTTPClient http;
@@ -2892,32 +3300,126 @@ void handleOtaCheck() {
 
 void handleOtaUrl() {
   addCORS();
+  
+  // ========== PARSE REQUEST ==========
   String url = "";
+  String md5 = "";
+  
   if (server.hasArg("plain")) {
     DynamicJsonDocument doc(256);
-    if (!deserializeJson(doc, server.arg("plain"))) url = String(doc["url"] | "");
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    
+    if (!error) {
+      url = String(doc["url"] | "");
+      md5 = String(doc["md5"] | "");
+    }
   }
+  
   if (url == "") url = server.arg("url");
+  if (md5 == "") md5 = server.arg("md5");
+  
   url.trim();
+  md5.trim();
+  
   if (url == "") {
-    server.send(400, "application/json", "{\"error\":\"missing url\"}");
+    server.send(200, "application/json", "{\"error\":\"missing url\"}");
     return;
   }
 
+  // ========== VALIDATION ==========
+  if (WiFi.status() != WL_CONNECTED) {
+    server.send(200, "application/json", "{\"error\":\"wifi_not_connected\"}");
+    return;
+  }
+
+  if (otaInProgress) {
+    server.send(200, "application/json", "{\"error\":\"ota_already_in_progress\"}");
+    return;
+  }
+
+  // ========== CHECK MEMORY ==========
+  uint32_t freeHeap = ESP.getFreeHeap();
+  Serial.printf("[OTA] Free heap BEFORE cleanup: %u bytes\n", freeHeap);
+  
+  if (freeHeap < 70000) {
+    Serial.printf("[OTA] ERROR: Insufficient heap: %u bytes\n", freeHeap);
+    server.send(200, "application/json", 
+      "{\"error\":\"insufficient_memory\",\"free_heap\":" + String(freeHeap) + "}");
+    return;
+  }
+
+  Serial.printf("[OTA] Starting OTA update...\n");
+  Serial.printf("[OTA] URL: %s\n", url.c_str());
+  if (md5.length() > 0) {
+    Serial.printf("[OTA] MD5: %s\n", md5.c_str());
+  }
+
+  // ========== SEND RESPONSE ==========
+  server.send(202, "application/json", 
+    "{\"status\":\"ota_started\",\"message\":\"Update in progress\"}");
+  delay(200);
+  yield();
+
+  // ========== FREE MEMORY ==========
+  Serial.println("[OTA] ⏸️  Stopping services to free memory...");
+  
+  // Stop WebSocket
+  webSocket.disconnect();
+  delay(50);
+  
+  // Stop IR receiver
+  irRxStop();
+  irRxFlush();
+  
+  // Clear JSON buffers
+  lastIrJson = "";
+  lastRfJson = "";
+  
+  delay(100);
+  yield();
+  
+  freeHeap = ESP.getFreeHeap();
+  Serial.printf("[OTA] Free heap AFTER cleanup: %u bytes\n", freeHeap);
+
+  // ========== PERFORM OTA ==========
   String err;
   uint32_t written = 0;
-  bool ok = doHttpOtaUrl(url, "", err, written);
+  bool ok = doHttpOtaUrl(url, md5, err, written);
+  
   otaLastOk = ok;
   otaLastBytes = written;
   otaLastErr = ok ? "" : err;
 
-  DynamicJsonDocument resp(256);
-  resp["ok"] = ok;
-  resp["written"] = written;
-  String out;
-  serializeJson(resp, out);
-  server.send(ok ? 200 : 500, "application/json", out);
-  if (ok) otaRebootAtMs = millis() + 1200;
+  // ========== HANDLE RESULT ==========
+  if (ok) {
+    // ✅ SUCCESS
+    Serial.println("\n╔════════════════════════════════════════╗");
+    Serial.println("║   ✓✓✓ OTA UPDATE SUCCESSFUL ✓✓✓       ║");
+    Serial.println("║   Rebooting in 3 seconds...            ║");
+    Serial.println("╚════════════════════════════════════════╝\n");
+    
+    otaRebootAtMs = millis() + 3000;
+    // Device will reboot - services restart automatically
+    
+  } else {
+    // ❌ FAILURE
+    Serial.println("\n╔════════════════════════════════════════╗");
+    Serial.println("║   ✗✗✗ OTA UPDATE FAILED ✗✗✗            ║");
+    Serial.printf("║   Error: %-30s║\n", err.c_str());
+    Serial.println("║   Restarting services...               ║");
+    Serial.println("╚════════════════════════════════════════╝\n");
+    
+    // ✅ RESTART SERVICES IMMEDIATELY
+    Serial.println("[OTA] ▶️  Restarting services...");
+    
+    irRxStart();
+    Serial.println("[OTA] ✓ IR receiver restarted");
+    
+    webSocket.begin();
+    Serial.println("[OTA] ✓ WebSocket server restarted");
+    
+    Serial.println("[OTA] ✓ Device back to normal - you can retry");
+  }
 }
 
 void handleRfSend() {
@@ -2944,7 +3446,7 @@ void handleRfSend() {
   }
 
   if (!code) {
-    server.send(400, "application/json", "{\"error\":\"missing code\"}");
+    server.send(200, "application/json", "{\"error\":\"missing code\"}");
     return;
   }
 
@@ -2975,7 +3477,7 @@ void handleRfSend() {
 void handleRfLast() {
   addCORS();
   if (lastRfJson.length() == 0) {
-    server.send(404, "application/json", "{\"error\":\"no_rf_capture_yet\"}");
+    server.send(200, "application/json", "{\"error\":\"no_rf_capture_yet\"}");
   } else {
     server.send(200, "application/json", lastRfJson);
   }
@@ -2998,6 +3500,25 @@ void handleRfStatus() {
   server.send(200, "application/json", out);
 }
 
+// WiFi connection watchdog - checks connection health
+void wifiWatchdog() {
+  static uint32_t lastCheck = 0;
+  static uint8_t checkInterval = 30; // Check every 30 seconds
+  
+  if (millis() - lastCheck < checkInterval * 1000) return;
+  lastCheck = millis();
+  
+  // If we should be connected but aren't
+  if (staHaveCreds && !staConnected && WiFi.status() != WL_CONNECTED) {
+    Serial.println("[Watchdog] WiFi disconnected - forcing reconnect");
+    WiFi.disconnect(false);
+    delay(100);
+    applyNetworkConfig();
+    WiFi.begin(staSsid.c_str(), staPass.c_str());
+    staConnecting = true;
+  }
+}
+
 // ========== SETUP ==========
 
 void setup() {
@@ -3006,9 +3527,10 @@ void setup() {
   esp_log_level_set("*", ESP_LOG_WARN);
 
   Serial.println("\n╔════════════════════════════════════════════════════════╗");
-  Serial.println("║       ESP32 IR/RF GATEWAY + COMMAND STORAGE v1.1.2    ║");
+  Serial.println("║       ESP32 IR/RF GATEWAY + WEBSOCKET v1.2.2          ║");
   Serial.println("╚════════════════════════════════════════════════════════╝");
 
+  checkPowerCycleReset();
   // Initialize RF 433MHz
   Serial.println("\n[RF] Initializing...");
   rfRx.enableReceive(digitalPinToInterrupt(RF_RX_PIN));
@@ -3033,11 +3555,17 @@ void setup() {
   loadStaCreds();
   loadOtaCfg();
   loadPinConfig();
+  loadNetworkConfig();
 
   printTokenInfo();
 
   WiFi.onEvent(onWiFiEvent);
   bringUpWifi();
+
+  // Initialize WebSocket server
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+  Serial.println("[WS] WebSocket server started on port 81");
 
   // Challenge-Response routes (NO AUTH)
   server.on("/api/auth/challenge/setup", HTTP_POST, handleChallengeSetup);
@@ -3046,20 +3574,15 @@ void setup() {
   server.on("/api/auth/challenge/status", HTTP_GET, handleChallengeStatus);
   server.on("/api/auth/challenge/reset", HTTP_POST, handleChallengeReset);
 
-  server.on("/api/storage/info", HTTP_GET, []() { 
-    if (!requireAuth()) return; 
-    handleStorageInfo(); 
-  });
+  // Network configuration routes
+  server.on("/api/network/config", HTTP_GET, handleNetworkConfigGet);
+  server.on("/api/network/config", HTTP_POST, handleNetworkConfigSet);
   
-  server.on("/api/rf/clear", HTTP_POST, []() { 
-    if (!requireAuth()) return; 
-    handleClearRfStorage(); 
-  });
-  
-  server.on("/api/ir/clear", HTTP_POST, []() { 
-    if (!requireAuth()) return; 
-    handleClearIrStorage(); 
-  });
+
+  // Storage info routes
+  server.on("/api/storage/info", HTTP_GET, handleStorageInfo);
+  server.on("/api/rf/clear", HTTP_POST, handleClearRfStorage);
+  server.on("/api/ir/clear", HTTP_POST, handleClearIrStorage);
 
   // Public routes
   server.on("/", HTTP_GET, handleRoot);
@@ -3089,6 +3612,8 @@ void setup() {
   server.on("/api/ota/config", HTTP_POST, []() { if (!requireAuth()) return; handleOtaSetCfg(); });
   server.on("/api/ota/check", HTTP_POST, []() { if (!requireAuth()) return; handleOtaCheck(); });
   server.on("/api/ota/url", HTTP_POST, []() { if (!requireAuth()) return; handleOtaUrl(); });
+
+  server.on("/api/factory/reset", HTTP_POST, []() { if (!requireAuth()) return; handleFactoryReset();});
   
   // RF 433MHz routes
   server.on("/api/rf/send", HTTP_POST, []() { if (!requireAuth()) return; handleRfSend(); });
@@ -3101,7 +3626,7 @@ void setup() {
   server.on("/api/rf/send/name", HTTP_POST, []() { if (!requireAuth()) return; handleRfSendByName(); });
   server.on("/api/rf/delete", HTTP_DELETE, []() { if (!requireAuth()) return; handleRfDelete(); });
   
-  // IR Command Storage routes (FIXED)
+  // IR Command Storage routes
   server.on("/api/ir/save", HTTP_POST, []() { if (!requireAuth()) return; handleIrSave(); });
   server.on("/api/ir/saved", HTTP_GET, []() { if (!requireAuth()) return; handleIrListSaved(); });
   server.on("/api/ir/send/name", HTTP_POST, []() { if (!requireAuth()) return; handleIrSendByName(); });
@@ -3116,10 +3641,10 @@ void setup() {
   server.onNotFound([]() {
     if (server.method() == HTTP_OPTIONS) {
       addCORS();
-      server.send(204);
+      server.send(200);
       return;
     }
-    server.send(404, "text/plain", "Not found");
+    server.send(200, "text/plain", "Not found");
   });
 
   server.begin();
@@ -3131,9 +3656,10 @@ void setup() {
 
   nextOtaCheckAtMs = millis() + 15000;
 
-  Serial.println("\n[API] ✓ Server ready with IR/RF command storage!");
-  Serial.println("[STORAGE] Name index system active");
-  Serial.println("[IR] Persistent capture storage enabled");
+  Serial.println("\n[API] ✓ Server ready!");
+  Serial.println("[WS] WebSocket server on ws://[IP]:81/ws");
+  Serial.println("[NET] Static/DHCP IP configuration supported");
+  Serial.println("[STORAGE] Command storage enabled");
   Serial.println("[RF] Listening for 433MHz signals...\n");
 }
 
@@ -3141,11 +3667,35 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  webSocket.loop();
 
   pollIr();
   pollRf();
   pollFactoryButton();
+  wifiWatchdog();
 
+  clearPowerCycleCounter();  
+
+  // **ADD THIS: Active WiFi reconnection logic**
+  if (staHaveCreds && !staConnected && !staConnecting) {
+    if (wifiReconnectAtMs && (int32_t)(millis() - wifiReconnectAtMs) >= 0) {
+      Serial.printf("[WiFi] Attempting reconnection #%u...\n", wifiReconnectAttempts);
+      
+      // Try to reconnect
+      WiFi.disconnect(false);  // Don't erase credentials
+      delay(100);
+      applyNetworkConfig();
+      WiFi.begin(staSsid.c_str(), staPass.c_str());
+      staConnecting = true;
+      
+      // Schedule next attempt
+      wifiReconnectAtMs = millis() + wifiReconnectInterval;
+      
+      // Increase interval with exponential backoff
+      wifiReconnectInterval = min(wifiReconnectInterval + 2000, 
+                                  (uint32_t)WIFI_RECONNECT_MAX_INTERVAL);
+    }
+  }
   // AP re-enable logic
   if (!staConnected && !apEnabled && apReenableAtMs && millis() >= apReenableAtMs) {
     startAPIfNeeded("Re-enable (STA down)");
