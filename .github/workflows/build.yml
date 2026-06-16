@@ -33,13 +33,17 @@ jobs:
           arduino-cli lib install "ArduinoJson"
           arduino-cli lib install "rc-switch"
 
+      - name: Prepare Sketch Directory
+        run: |
+          mv KinkonyAGFW_Arduino Haptique_AGFW
+
       - name: Compile Sketch
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32 KinkonyAGFW_Arduino/Haptique_AGFW.ino
+          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build Haptique_AGFW/Haptique_AGFW.ino
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: compiled-firmware
-          path: KinkonyAGFW_Arduino/build/esp32.esp32.esp32/Haptique_AGFW.ino.bin
+          path: build/Haptique_AGFW.ino.bin
           if-no-files-found: ignore
